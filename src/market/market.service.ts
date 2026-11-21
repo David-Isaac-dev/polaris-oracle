@@ -5,6 +5,7 @@ import { OracleService } from './oracle.service';
 import { MarketRepository } from './market.repository';
 import { MarketEvents } from './market-events';
 import { AdminActivityRepository } from './admin-activity.repository';
+import { MetricsService } from './metrics.service';
 import { fetchHermesPriceCents } from './pyth-price';
 import type { WatchedMarket } from './market.types';
 import type { FeedCatalogEntry } from './market-factory.service';
@@ -67,7 +68,15 @@ export class MarketService implements OnModuleInit {
     private readonly config: ConfigService,
     private readonly events: MarketEvents,
     private readonly activity: AdminActivityRepository,
-  ) {}
+    private readonly metrics: MetricsService,
+  ) {
+    metrics.register('polaris_settle_success', 'Markets successfully settled');
+    metrics.register('polaris_settle_failure', 'Settle attempts that failed and fell to cancel');
+    metrics.register('polaris_cancel_success', 'Markets successfully cancelled');
+    metrics.register('polaris_cancel_failure', 'Cancel attempts that failed');
+    metrics.register('polaris_settle_retry', 'Transient settle retries before success or fallback');
+    metrics.register('polaris_cancel_fallback_scheduled', 'Times a cancel fallback was scheduled after settle failure');
+  }
 
   onModuleInit(): void {
     for (const m of this.repo.getAll()) {
@@ -131,6 +140,7 @@ export class MarketService implements OnModuleInit {
     const timer = setTimeout(() => void this.tryCancel(m), delay);
     this.cancelTimers.set(m.contractId, timer);
     this.logger.log(`scheduled cancel fallback for ${m.contractId} in ${Math.round(delay / 1000)}s`);
+    this.metrics.inc('polaris_cancel_fallback_scheduled');
   }
 
   private isTerminal(status: WatchedMarket['status']): boolean {
@@ -155,11 +165,13 @@ export class MarketService implements OnModuleInit {
         const txHash = await this.stellar.settleViaReflector(m.contractId);
         this.persist(m, { status: 'settled', settleTxHash: txHash, lastError: undefined });
         this.logger.log(`settled ${m.contractId} via Reflector (no Lazer token configured) in tx ${txHash}`);
+        this.metrics.inc('polaris_settle_success');
         return;
       } catch (err) {
         const message = (err as Error).message;
         if (await this.reconcileWithChain(m)) return;
         this.logger.warn(`Reflector-only settle failed for ${m.contractId}, falling back to cancel: ${message}`);
+        this.metrics.inc('polaris_settle_failure');
         this.scheduleCancelFallback(m);
         return;
       }
@@ -172,6 +184,7 @@ export class MarketService implements OnModuleInit {
         const txHash = await this.stellar.settle(m.contractId, payload);
         this.persist(m, { status: 'settled', settleTxHash: txHash, lastError: undefined });
         this.logger.log(`settled ${m.contractId} in tx ${txHash}`);
+        this.metrics.inc('polaris_settle_success');
         return;
       } catch (err) {
         const message = (err as Error).message;
@@ -180,10 +193,12 @@ export class MarketService implements OnModuleInit {
           this.logger.warn(
             `settle attempt ${attempt}/${SETTLE_RETRY_ATTEMPTS} failed for ${m.contractId}, retrying in ${SETTLE_RETRY_DELAY_MS / 1000}s: ${message}`,
           );
+          this.metrics.inc('polaris_settle_retry');
           await new Promise((resolve) => setTimeout(resolve, SETTLE_RETRY_DELAY_MS));
           continue;
         }
         this.logger.error(`settle failed for ${m.contractId} after ${SETTLE_RETRY_ATTEMPTS} attempts: ${message}`);
+        this.metrics.inc('polaris_settle_failure');
         this.persist(m, { status: 'pending', lastError: message });
         this.scheduleCancelFallback(m);
       }
@@ -198,6 +213,7 @@ export class MarketService implements OnModuleInit {
       const txHash = await this.stellar.cancel(m.contractId);
       this.persist(m, { status: 'cancelled', settleTxHash: txHash, lastError: undefined });
       this.logger.log(`cancelled ${m.contractId} in tx ${txHash}`);
+      this.metrics.inc('polaris_cancel_success');
     } catch (err) {
       const message = (err as Error).message;
       if (await this.reconcileWithChain(m)) return;
@@ -206,6 +222,7 @@ export class MarketService implements OnModuleInit {
       // is exactly what reconcileWithChain catches above. Anything else,
       // log and leave status as-is; an admin can retry via /markets/:id/cancel.
       this.logger.error(`cancel failed for ${m.contractId}: ${message}`);
+      this.metrics.inc('polaris_cancel_failure');
       this.persist(m, { status: 'pending', lastError: message });
     }
   }

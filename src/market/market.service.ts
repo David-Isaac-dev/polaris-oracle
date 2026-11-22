@@ -42,6 +42,20 @@ const SETTLE_RETRY_DELAY_MS = 75_000;
  * `arm()`, which don't need it.
  */
 const LEDGER_LAG_BUFFER_MS = 8_000;
+/**
+ * `onModuleInit` used to call `arm()` for every watched/pending market
+ * synchronously in a tight loop — for any market already past its expiry
+ * or grace period, `arm()` fires `trySettle`/`tryCancel` immediately, so a
+ * restart with several overdue markets launched that many settle/cancel
+ * attempts against the chain in the same instant. That's a thundering herd
+ * against the RPC node (and, worse, several of those calls can share the
+ * oracle's source account and race on its sequence number — see
+ * account-lock.ts) for no benefit: nothing requires overdue markets to be
+ * resolved within the same tick of each other. Staggering each market's
+ * initial arm by a small, increasing offset spreads that burst out without
+ * meaningfully delaying any individual market's resolution.
+ */
+const BOOT_ARM_STAGGER_MS = 500;
 
 /**
  * Owns the in-memory timer state that drives settlement automation. The
@@ -70,9 +84,16 @@ export class MarketService implements OnModuleInit {
   ) {}
 
   onModuleInit(): void {
+    let staggerIndex = 0;
     for (const m of this.repo.getAll()) {
       if (m.status === 'watching' || m.status === 'pending') {
-        this.arm(m);
+        const delay = staggerIndex * BOOT_ARM_STAGGER_MS;
+        staggerIndex++;
+        if (delay === 0) {
+          this.arm(m);
+        } else {
+          setTimeout(() => this.arm(m), delay);
+        }
       }
     }
   }

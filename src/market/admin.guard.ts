@@ -7,7 +7,7 @@ import {
   UnauthorizedException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { timingSafeEqual } from 'node:crypto';
+import { createHash, timingSafeEqual } from 'node:crypto';
 import type { Request } from 'express';
 
 /**
@@ -65,9 +65,7 @@ export class AdminGuard implements CanActivate {
       throw new UnauthorizedException('x-admin-key header is required');
     }
 
-    const expectedBuf = Buffer.from(expected);
-    const providedBuf = Buffer.from(provided);
-    if (expectedBuf.length !== providedBuf.length || !timingSafeEqual(expectedBuf, providedBuf)) {
+    if (!this.matchesAdminKey(expected, provided)) {
       this.recordFailure(clientKey, now);
       throw new UnauthorizedException('invalid admin key');
     }
@@ -84,5 +82,21 @@ export class AdminGuard implements CanActivate {
       entry.failures = 0;
     }
     this.lockouts.set(clientKey, entry);
+  }
+
+  /**
+   * Constant-time key comparison that does NOT branch on the two inputs'
+   * raw lengths first — an early `expectedBuf.length !== providedBuf.length`
+   * check (as this used to do) leaks the admin key's length to an attacker
+   * who can observe which requests short-circuit vs. go through the full
+   * `timingSafeEqual` call. Hashing both values to a fixed-size digest
+   * before comparing removes that branch entirely: `timingSafeEqual` always
+   * runs against two equal-length (32-byte) buffers regardless of what was
+   * provided.
+   */
+  private matchesAdminKey(expected: string, provided: string): boolean {
+    const expectedDigest = createHash('sha256').update(expected).digest();
+    const providedDigest = createHash('sha256').update(provided).digest();
+    return timingSafeEqual(expectedDigest, providedDigest);
   }
 }

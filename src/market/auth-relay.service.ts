@@ -85,6 +85,29 @@ export class AuthRelayService {
     this.server = new rpc.Server(rpcUrl, { allowHttp: rpcUrl.startsWith('http://') });
   }
 
+  /**
+   * Inclusion fee for a sponsored transaction, derived from the network's
+   * current fee climate rather than hardcoded `BASE_FEE` — under surge
+   * pricing, a flat minimum fee just sits unincluded until the relay's
+   * poll gives up, with no clear cause to the caller. Uses the p70 bucket
+   * of `getFeeStats()`'s Soroban inclusion-fee distribution, capped by
+   * `maxInclusionFeeStroops` so a fee spike can't blow sponsor cost out
+   * unbounded. Falls back to `BASE_FEE` if the stats call itself fails —
+   * this must never become a new way to block a sponsored transaction.
+   */
+  private async inclusionFee(): Promise<string> {
+    const cap = this.config.get<number>('maxInclusionFeeStroops') ?? 100_000;
+    try {
+      const stats = await this.server.getFeeStats();
+      const p70 = Number(stats.sorobanInclusionFee?.p70 ?? BASE_FEE);
+      const fee = Math.max(Number(BASE_FEE), Math.min(p70, cap));
+      return String(fee);
+    } catch (err) {
+      this.logger.warn(`getFeeStats failed, falling back to BASE_FEE: ${(err as Error).message}`);
+      return BASE_FEE;
+    }
+  }
+
   async prepare(
     walletAddress: string,
     contractId: string,
@@ -97,7 +120,7 @@ export class AuthRelayService {
 
     const sourceAccount = await this.server.getAccount(this.keypair.publicKey());
     const tx = new TransactionBuilder(sourceAccount, {
-      fee: BASE_FEE,
+      fee: await this.inclusionFee(),
       networkPassphrase: this.networkPassphrase,
     })
       .addOperation(op)
@@ -170,7 +193,7 @@ export class AuthRelayService {
 
     const sourceAccount = await this.server.getAccount(this.keypair.publicKey());
     let tx = new TransactionBuilder(sourceAccount, {
-      fee: BASE_FEE,
+      fee: await this.inclusionFee(),
       networkPassphrase: this.networkPassphrase,
     })
       .addOperation(op)

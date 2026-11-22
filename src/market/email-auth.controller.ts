@@ -89,7 +89,7 @@ export class EmailAuthController {
     if (!session) {
       throw new UnauthorizedException('not signed in');
     }
-    let result: { txHash: string; walletAddress: string };
+    let result: { txHash: string; walletAddress: string; status: 'success' | 'pending' };
     try {
       result = await this.emailAuth.signAndSubmitTrade(session.email, dto.contractId, dto.function, dto.args, dto.contractKind);
     } catch (err) {
@@ -116,7 +116,7 @@ export class EmailAuthController {
     } catch (err) {
       this.logger.warn(`failed to record admin-activity row for tx ${result.txHash}: ${(err as Error).message}`);
     }
-    return { txHash: result.txHash };
+    return { txHash: result.txHash, status: result.status };
   }
 
   private cookieOptions() {

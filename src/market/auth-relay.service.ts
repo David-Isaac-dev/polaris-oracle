@@ -212,12 +212,32 @@ export class AuthRelayService {
       throw new BadRequestException(`submit failed: ${JSON.stringify(sendRes.errorResult)}`);
     }
 
-    const finalRes = await this.pollTransaction(sendRes.hash);
-    if (finalRes.status !== rpc.Api.GetTransactionStatus.SUCCESS) {
-      throw new BadRequestException(`transaction ${sendRes.hash} did not succeed: ${finalRes.status}`);
+    // Keep only a short synchronous wait for the common fast case — the
+    // request used to stay open the full ~60s poll, close to typical
+    // proxy/browser idle limits, and a client-side timeout there invited a
+    // retry that could double-trade a transaction that actually landed.
+    // Callers that don't get SUCCESS here fall back to GET
+    // /wallets/tx/:hash to keep polling without holding this request open.
+    const finalRes = await this.pollTransaction(sendRes.hash, 5, 2000);
+    if (finalRes.status === rpc.Api.GetTransactionStatus.SUCCESS) {
+      return { txHash: sendRes.hash, walletAddress, status: 'success' as const };
     }
+    if (finalRes.status === rpc.Api.GetTransactionStatus.NOT_FOUND) {
+      return { txHash: sendRes.hash, walletAddress, status: 'pending' as const };
+    }
+    throw new BadRequestException(`transaction ${sendRes.hash} did not succeed: ${finalRes.status}`);
+  }
 
-    return { txHash: sendRes.hash, walletAddress };
+  /** Status of a previously-submitted transaction — the second half of the short-poll-then-redirect pattern `submit()` now uses instead of blocking on a long poll itself. */
+  async txStatus(txHash: string): Promise<{ txHash: string; status: 'pending' | 'success' | 'failed' }> {
+    const res = await this.server.getTransaction(txHash);
+    if (res.status === rpc.Api.GetTransactionStatus.SUCCESS) {
+      return { txHash, status: 'success' };
+    }
+    if (res.status === rpc.Api.GetTransactionStatus.NOT_FOUND) {
+      return { txHash, status: 'pending' };
+    }
+    return { txHash, status: 'failed' };
   }
 
   private async pollTransaction(txHash: string, attempts = 30, delayMs = 2000): Promise<rpc.Api.GetTransactionResponse> {
@@ -226,9 +246,11 @@ export class AuthRelayService {
       if (res.status !== rpc.Api.GetTransactionStatus.NOT_FOUND) {
         return res;
       }
-      await new Promise((resolve) => setTimeout(resolve, delayMs));
+      if (i < attempts - 1) {
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+      }
     }
-    throw new Error(`transaction ${txHash} not confirmed after ${attempts} attempts`);
+    return { status: rpc.Api.GetTransactionStatus.NOT_FOUND } as rpc.Api.GetTransactionResponse;
   }
 }
 

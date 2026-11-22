@@ -112,7 +112,7 @@ export class EmailAuthService {
     functionName: string,
     args: WireArgs,
     contractKind?: ContractKind,
-  ): Promise<{ txHash: string; walletAddress: string }> {
+  ): Promise<{ txHash: string; walletAddress: string; status: 'success' | 'pending' }> {
     const walletRow = this.repo.getWallet(email);
     if (!walletRow) {
       throw new EmailAuthError('No wallet found for this session — sign in again.');

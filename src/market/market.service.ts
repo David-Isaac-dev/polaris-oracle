@@ -28,6 +28,18 @@ const RECONCILE_READ_RETRY_DELAY_MS = 750;
 const SETTLE_RETRY_ATTEMPTS = 3;
 const SETTLE_RETRY_DELAY_MS = 75_000;
 /**
+ * `tryCancel` used to have no retry at all: on failure it just logged and
+ * persisted `status: 'pending'` with no timer scheduled to ever touch that
+ * market again — the only way out was an admin noticing and calling
+ * `/markets/:id/cancel` by hand. Since `cancel` is permissionless and
+ * idempotent-safe on-chain (see `tryCancel`'s own comment), and the same
+ * transient-RPC-hiccup class of failure already justifies retries elsewhere
+ * in this file (`SETTLE_RETRY_ATTEMPTS`, `withRpcRetry`), a failed cancel
+ * deserves the same automatic retry treatment rather than silently stalling
+ * forever.
+ */
+const CANCEL_RETRY_DELAY_MS = 60_000;
+/**
  * Confirmed live, twice, this session: a timer scheduled to fire exactly at
  * `expiry`/`grace_period_secs` (computed from this process's wall clock)
  * can beat the chain to it — the contract checks `now >= ...` against the
@@ -225,10 +237,21 @@ export class MarketService implements OnModuleInit {
       // Cancel is permissionless and idempotent-safe on-chain (a second
       // call after it's already Cancelled/Resolved just errors) — that case
       // is exactly what reconcileWithChain catches above. Anything else,
-      // log and leave status as-is; an admin can retry via /markets/:id/cancel.
-      this.logger.error(`cancel failed for ${m.contractId}: ${message}`);
+      // log, leave status as 'pending', and schedule an automatic retry
+      // (an admin can still force one sooner via /markets/:id/cancel) —
+      // without this, a transient failure here left the market stuck
+      // 'pending' forever with nothing left to ever retry it.
+      this.logger.error(`cancel failed for ${m.contractId}: ${message}, retrying in ${CANCEL_RETRY_DELAY_MS / 1000}s`);
       this.persist(m, { status: 'pending', lastError: message });
+      this.scheduleCancelRetry(m);
     }
+  }
+
+  private scheduleCancelRetry(m: WatchedMarket): void {
+    const existing = this.cancelTimers.get(m.contractId);
+    if (existing) clearTimeout(existing);
+    const timer = setTimeout(() => void this.tryCancel(m), CANCEL_RETRY_DELAY_MS);
+    this.cancelTimers.set(m.contractId, timer);
   }
 
   /**

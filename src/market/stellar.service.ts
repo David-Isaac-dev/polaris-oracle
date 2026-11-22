@@ -233,6 +233,24 @@ interface VaultContractMethods {
 @Injectable()
 export class StellarService {
   private readonly logger = new Logger(StellarService.name);
+
+  /**
+   * Extracts the tx hash from a `signAndSend()` result, preferring the
+   * send response's hash and falling back to the get-response's txHash.
+   * Never falls back to `''`: an empty string is indistinguishable from a
+   * real hash once persisted (skips activity logging, breaks explorer
+   * links, looks like data loss) — if neither field is present, that's a
+   * genuine anomaly worth surfacing loudly rather than silently papering
+   * over.
+   */
+  private txHashOf(sent: { sendTransactionResponse?: { hash?: string }; getTransactionResponse?: { txHash?: string } }): string {
+    const hash = sent.sendTransactionResponse?.hash ?? sent.getTransactionResponse?.txHash;
+    if (!hash) {
+      this.logger.warn('signAndSend succeeded but no tx hash was present on either response');
+      throw new Error('no tx hash available on successful transaction');
+    }
+    return hash;
+  }
   readonly server: rpc.Server;
   private readonly keypair: Keypair;
   private readonly secretKey: string;
@@ -445,7 +463,7 @@ export class StellarService {
     const client = this.buildClient<PerpetualContractMethods>(perpetualSpec, contractId, this.deployerKeypair);
     const tx = await this.withRpcRetry(() => client.terminate({ admin: this.deployerKeypair.publicKey() }));
     const sent = await tx.signAndSend();
-    return sent.sendTransactionResponse?.hash ?? sent.getTransactionResponse?.txHash ?? '';
+    return this.txHashOf(sent);
   }
 
   /**
@@ -467,7 +485,7 @@ export class StellarService {
     const timestamp = BigInt(Math.floor(Date.now() / 1000));
     const tx = await this.withRpcRetry(() => client.set_price({ price, timestamp }));
     const sent = await tx.signAndSend();
-    return sent.sendTransactionResponse?.hash ?? sent.getTransactionResponse?.txHash ?? '';
+    return this.txHashOf(sent);
   }
 
   /** Permissionless at the contract level (see `record_price_checkpoint`'s own doc comment in `polaris-contracts`) — signed here by this process's own keypair purely because *some* account has to pay the fee, same as `settle`/`cancel`. */
@@ -475,7 +493,7 @@ export class StellarService {
     const client = this.perpetualClient(contractId);
     const tx = await this.withRpcRetry(() => client.record_price_checkpoint({ payload }));
     const sent = await tx.signAndSend();
-    return sent.sendTransactionResponse?.hash ?? sent.getTransactionResponse?.txHash ?? '';
+    return this.txHashOf(sent);
   }
 
   // ---------- oracle-authorized writes ----------
@@ -484,7 +502,7 @@ export class StellarService {
     const client = this.marketClient(contractId);
     const tx = await this.withRpcRetry(() => client.settle({ payload }));
     const sent = await tx.signAndSend();
-    return sent.sendTransactionResponse?.hash ?? sent.getTransactionResponse?.txHash ?? '';
+    return this.txHashOf(sent);
   }
 
   /**
@@ -503,14 +521,14 @@ export class StellarService {
     const client = this.marketClient(contractId);
     const tx = await this.withRpcRetry(() => client.settle_via_reflector());
     const sent = await tx.signAndSend();
-    return sent.sendTransactionResponse?.hash ?? sent.getTransactionResponse?.txHash ?? '';
+    return this.txHashOf(sent);
   }
 
   async cancel(contractId: string): Promise<string> {
     const client = this.marketClient(contractId);
     const tx = await this.withRpcRetry(() => client.cancel());
     const sent = await tx.signAndSend();
-    return sent.sendTransactionResponse?.hash ?? sent.getTransactionResponse?.txHash ?? '';
+    return this.txHashOf(sent);
   }
 
   /**
@@ -551,7 +569,7 @@ export class StellarService {
     );
     const sent = await tx.signAndSend();
     sent.result.unwrap();
-    return sent.sendTransactionResponse?.hash ?? sent.getTransactionResponse?.txHash ?? '';
+    return this.txHashOf(sent);
   }
 
   /**
@@ -635,7 +653,7 @@ export class StellarService {
     );
     const sent = await tx.signAndSend();
     sent.result.unwrap();
-    return sent.sendTransactionResponse?.hash ?? sent.getTransactionResponse?.txHash ?? '';
+    return this.txHashOf(sent);
   }
 
   // ---------- market deployment (Stellar CLI) ----------

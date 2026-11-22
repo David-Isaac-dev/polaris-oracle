@@ -17,6 +17,7 @@ import type { contract } from '@stellar/stellar-sdk';
 import { marketSpec, perpetualSpec } from './contracts';
 import { buildSponsoredCallArgs, type WireArgs } from './wire-args';
 import type { ContractKind } from './dto/prepare-auth.dto';
+import { getAccountLock, type AsyncLock } from './account-lock';
 
 /** `polaris-market`/`polaris-perpetual` share every sponsorable function's
  * name and shape (see `polaris-contracts/README.md`'s "The perpetual
@@ -73,6 +74,15 @@ export class AuthRelayService {
   private readonly server: rpc.Server;
   private readonly keypair: Keypair;
   private readonly networkPassphrase: string;
+  /**
+   * Shared with `StellarService` (keyed by the same `ORACLE_SECRET_KEY`
+   * secret — see account-lock.ts) because `submit()` below fetches this
+   * same source account's sequence number and submits a transaction from
+   * it, exactly like `StellarService.settle`/`cancel`/etc. Without sharing
+   * the lock, a sponsored-auth submit racing an oracle settle/cancel could
+   * each read the same sequence number before either submits.
+   */
+  private readonly accountLock: AsyncLock;
 
   constructor(private readonly config: ConfigService) {
     const secret = this.config.get<string>('oracleSecretKey');
@@ -83,6 +93,7 @@ export class AuthRelayService {
     this.networkPassphrase = this.config.get<string>('stellarNetworkPassphrase') ?? Networks.TESTNET;
     const rpcUrl = this.config.get<string>('stellarRpcUrl')!;
     this.server = new rpc.Server(rpcUrl, { allowHttp: rpcUrl.startsWith('http://') });
+    this.accountLock = getAccountLock(secret);
   }
 
   async prepare(
@@ -168,33 +179,41 @@ export class AuthRelayService {
     const op = new Contract(contractId).call(functionName, ...scArgs);
     op.body().invokeHostFunctionOp().auth([signedEntry]);
 
-    const sourceAccount = await this.server.getAccount(this.keypair.publicKey());
-    let tx = new TransactionBuilder(sourceAccount, {
-      fee: BASE_FEE,
-      networkPassphrase: this.networkPassphrase,
-    })
-      .addOperation(op)
-      .setTimeout(60)
-      .build();
+    // Serialized against this process's other submits from the same source
+    // account (StellarService.settle/cancel/etc share this lock) — the
+    // getAccount() sequence-number fetch below and the sendTransaction()
+    // submit must happen as one atomic unit from this account's point of
+    // view, otherwise a concurrent caller can read the same sequence number
+    // before either submits.
+    return this.accountLock.run(async () => {
+      const sourceAccount = await this.server.getAccount(this.keypair.publicKey());
+      let tx = new TransactionBuilder(sourceAccount, {
+        fee: BASE_FEE,
+        networkPassphrase: this.networkPassphrase,
+      })
+        .addOperation(op)
+        .setTimeout(60)
+        .build();
 
-    const sim = await this.server.simulateTransaction(tx);
-    if (rpc.Api.isSimulationError(sim)) {
-      throw new BadRequestException(`simulation failed: ${sim.error}`);
-    }
-    tx = rpc.assembleTransaction(tx, sim).build();
-    tx.sign(this.keypair);
+      const sim = await this.server.simulateTransaction(tx);
+      if (rpc.Api.isSimulationError(sim)) {
+        throw new BadRequestException(`simulation failed: ${sim.error}`);
+      }
+      tx = rpc.assembleTransaction(tx, sim).build();
+      tx.sign(this.keypair);
 
-    const sendRes = await this.server.sendTransaction(tx);
-    if (sendRes.status === 'ERROR') {
-      throw new BadRequestException(`submit failed: ${JSON.stringify(sendRes.errorResult)}`);
-    }
+      const sendRes = await this.server.sendTransaction(tx);
+      if (sendRes.status === 'ERROR') {
+        throw new BadRequestException(`submit failed: ${JSON.stringify(sendRes.errorResult)}`);
+      }
 
-    const finalRes = await this.pollTransaction(sendRes.hash);
-    if (finalRes.status !== rpc.Api.GetTransactionStatus.SUCCESS) {
-      throw new BadRequestException(`transaction ${sendRes.hash} did not succeed: ${finalRes.status}`);
-    }
+      const finalRes = await this.pollTransaction(sendRes.hash);
+      if (finalRes.status !== rpc.Api.GetTransactionStatus.SUCCESS) {
+        throw new BadRequestException(`transaction ${sendRes.hash} did not succeed: ${finalRes.status}`);
+      }
 
-    return { txHash: sendRes.hash, walletAddress };
+      return { txHash: sendRes.hash, walletAddress };
+    });
   }
 
   private async pollTransaction(txHash: string, attempts = 30, delayMs = 2000): Promise<rpc.Api.GetTransactionResponse> {

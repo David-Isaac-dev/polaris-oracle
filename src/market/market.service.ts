@@ -85,6 +85,17 @@ export class MarketService implements OnModuleInit {
   private readonly logger = new Logger(MarketService.name);
   private readonly settleTimers = new Map<string, NodeJS.Timeout>();
   private readonly cancelTimers = new Map<string, NodeJS.Timeout>();
+  /**
+   * Tracks markets currently inside `trySettle`'s retry loop. `trySettle`
+   * has no per-market guard of its own: the scheduled retry path (sleeping
+   * up to `SETTLE_RETRY_DELAY_MS` between attempts) and an admin's manual
+   * `triggerSettle` can both call it for the same market at the same
+   * time — e.g. an admin forces a retry during the 75s sleep of an
+   * already-running automatic retry loop — and both loops then submit
+   * `settle` concurrently for the same contract. Checked at the start of
+   * both entry points (`arm`'s scheduled fire and `triggerSettle`).
+   */
+  private readonly settleInFlight = new Set<string>();
 
   constructor(
     private readonly repo: MarketRepository,
@@ -173,6 +184,19 @@ export class MarketService implements OnModuleInit {
   private async trySettle(m: WatchedMarket): Promise<void> {
     if (this.isTerminal(m.status)) return;
 
+    if (this.settleInFlight.has(m.contractId)) {
+      this.logger.warn(`settle already in flight for ${m.contractId}, skipping concurrent call`);
+      return;
+    }
+    this.settleInFlight.add(m.contractId);
+    try {
+      await this.trySettleInner(m);
+    } finally {
+      this.settleInFlight.delete(m.contractId);
+    }
+  }
+
+  private async trySettleInner(m: WatchedMarket): Promise<void> {
     if (!this.oracle.isAvailable) {
       // No Lazer payload to settle with at all (no PYTH_LAZER_TOKEN
       // configured) — try the contract's Reflector-only settlement path

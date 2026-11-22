@@ -19,6 +19,11 @@ interface SessionClaims {
   address: string;
 }
 
+/** Session JWTs are signed and verified with exactly this algorithm, issuer, and audience pinned — without pinning, `jwt.verify` accepts any algorithm/issuer/audience the token itself claims, which is how "alg: none" and cross-service token-confusion attacks happen. */
+const SESSION_JWT_ALGORITHM = 'HS256' as const;
+const SESSION_JWT_ISSUER = 'polaris-oracle';
+const SESSION_JWT_AUDIENCE = 'polaris-oracle-session';
+
 /**
  * Email fallback for the passkey-only login flow — see `polaris-frontend`'s
  * `wallet-provider.tsx` doc comment for why this exists: passkeys need a
@@ -98,7 +103,11 @@ export class EmailAuthService {
   verifySession(token: string | undefined): SessionClaims | null {
     if (!token) return null;
     try {
-      const claims = jwt.verify(token, this.config.get<string>('sessionJwtSecret')!) as SessionClaims;
+      const claims = jwt.verify(token, this.config.get<string>('sessionJwtSecret')!, {
+        algorithms: [SESSION_JWT_ALGORITHM],
+        issuer: SESSION_JWT_ISSUER,
+        audience: SESSION_JWT_AUDIENCE,
+      }) as SessionClaims;
       return { email: claims.email, address: claims.address };
     } catch {
       return null;
@@ -173,6 +182,9 @@ export class EmailAuthService {
     const ttlSecs = this.config.get<number>('sessionTtlSecs')!;
     return jwt.sign({ email, address } satisfies SessionClaims, this.config.get<string>('sessionJwtSecret')!, {
       expiresIn: ttlSecs,
+      algorithm: SESSION_JWT_ALGORITHM,
+      issuer: SESSION_JWT_ISSUER,
+      audience: SESSION_JWT_AUDIENCE,
     });
   }
 }

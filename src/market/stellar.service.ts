@@ -2,7 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Keypair, rpc } from '@stellar/stellar-sdk';
 import { contract as StellarContract } from '@stellar/stellar-sdk';
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import { marketSpec, perpetualSpec, factorySpec, vaultSpec, mockRedstoneSpec } from './contracts';
 import { hermesPriceToCents } from './pyth-price';
@@ -253,6 +253,9 @@ export class StellarService {
    */
   private readonly deployerKeypair: Keypair;
   private readonly deployerSecretKey: string;
+  /** Name of the local `stellar` CLI identity the deploy secret is registered under — see `ensureDeployerCliIdentity`. Never passed to a child process via argv. */
+  private readonly deployerCliIdentity = 'polaris-oracle-deployer';
+  private deployerCliIdentityReady: Promise<void> | null = null;
   readonly networkPassphrase: string;
   readonly rpcUrl: string;
 
@@ -662,6 +665,7 @@ export class StellarService {
   // this transaction to match it. See the field doc comment on
   // `deployerKeypair` for why this split is safe and worth having.
   async deployMarket(params: CreateMarketParams): Promise<{ contractId: string; initTxHash: string }> {
+    await this.ensureDeployerCliIdentity();
     const network = this.config.get<string>('stellarNetwork')!;
     const deploy = await this.execStellarCli([
       'contract',
@@ -669,7 +673,7 @@ export class StellarService {
       '--wasm',
       'wasm/polaris_market.wasm',
       '--source',
-      this.deployerSecretKey,
+      this.deployerCliIdentity,
       '--network',
       network,
       '--rpc-url',
@@ -692,7 +696,7 @@ export class StellarService {
       '--id',
       contractId,
       '--source',
-      this.deployerSecretKey,
+      this.deployerCliIdentity,
       '--network',
       network,
       '--rpc-url',
@@ -783,6 +787,7 @@ export class StellarService {
    * this exact contract elsewhere in this codebase).
    */
   async getReflectorPriceCents(reflectorContract: string, asset: string): Promise<bigint> {
+    await this.ensureDeployerCliIdentity();
     const network = this.config.get<string>('stellarNetwork')!;
     const baseArgs = [
       'contract',
@@ -790,7 +795,7 @@ export class StellarService {
       '--id',
       reflectorContract,
       '--source',
-      this.deployerSecretKey,
+      this.deployerCliIdentity,
       '--network',
       network,
       '--rpc-url',
@@ -822,6 +827,7 @@ export class StellarService {
    * not exposed anywhere in this backend either — see `PerpetualController`.
    */
   async deployPerpetual(params: CreatePerpetualParams): Promise<{ contractId: string; initTxHash: string }> {
+    await this.ensureDeployerCliIdentity();
     const network = this.config.get<string>('stellarNetwork')!;
     const deploy = await this.execStellarCli([
       'contract',
@@ -829,7 +835,7 @@ export class StellarService {
       '--wasm',
       'wasm/polaris_perpetual.wasm',
       '--source',
-      this.deployerSecretKey,
+      this.deployerCliIdentity,
       '--network',
       network,
       '--rpc-url',
@@ -848,7 +854,7 @@ export class StellarService {
       '--id',
       contractId,
       '--source',
-      this.deployerSecretKey,
+      this.deployerCliIdentity,
       '--network',
       network,
       '--rpc-url',
@@ -889,6 +895,36 @@ export class StellarService {
       );
       return { contractId, initTxHash: '' };
     }
+  }
+
+  /**
+   * Registers `deployerSecretKey` as a named `stellar` CLI identity exactly
+   * once per process, feeding the secret to `stellar keys add`'s stdin
+   * rather than its argv. Every CLI deploy/invoke call below then passes
+   * `--source <identity-name>` instead of the raw secret, so the key never
+   * shows up in `ps`/`/proc/<pid>/cmdline`, visible to every other process
+   * in the container. Cached so repeated deploy calls don't re-register.
+   */
+  private ensureDeployerCliIdentity(): Promise<void> {
+    if (!this.deployerCliIdentityReady) {
+      this.deployerCliIdentityReady = new Promise<void>((resolve, reject) => {
+        const child = spawn('stellar', ['keys', 'add', this.deployerCliIdentity, '--secret-key', '--overwrite'], {
+          stdio: ['pipe', 'pipe', 'pipe'],
+        });
+        let stderr = '';
+        child.stderr.on('data', (chunk: Buffer) => {
+          stderr += chunk.toString();
+        });
+        child.on('error', reject);
+        child.on('close', (code) => {
+          if (code === 0) resolve();
+          else reject(new Error(`failed to register deployer CLI identity: ${stderr.trim()}`));
+        });
+        child.stdin.write(`${this.deployerSecretKey}\n`);
+        child.stdin.end();
+      });
+    }
+    return this.deployerCliIdentityReady;
   }
 
   /** Runs a `stellar` CLI call, retrying past the transient failures in `TRANSIENT_CLI_ERROR`. Anything else fails immediately — retrying a genuine error (bad params, insufficient balance) would just waste time before failing anyway. */

@@ -176,6 +176,45 @@ export class AdminController {
   settlementChecks(@Query('limit') limit?: string) {
     return { checks: this.activity.getRecentSettlementChecks(parseLimit(limit)) };
   }
+
+  /**
+   * Returns all markets in the `pending` state sorted by age (oldest first),
+   * with their `lastError` and time since last update — giving the operator
+   * enough context to triage without having to filter `GET /markets` manually.
+   *
+   * "Stuck" here means: `pending` for more than `ageThresholdSecs` seconds
+   * since `updatedAt` (default 300 s / 5 min).  All pending markets are
+   * returned regardless; the `isStuck` flag helps the dashboard highlight
+   * the ones that need immediate attention.  Issue #166.
+   */
+  @Get('pending-markets')
+  pendingMarkets(@Query('ageThresholdSecs') ageThresholdSecs?: string) {
+    const nowSec = Math.floor(Date.now() / 1000);
+    const threshold = (() => {
+      const n = Number(ageThresholdSecs);
+      return Number.isFinite(n) && n > 0 ? n : 300;
+    })();
+
+    const pending = this.markets
+      .getAll()
+      .filter((m) => m.status === 'pending')
+      .sort((a, b) => a.updatedAt - b.updatedAt); // oldest first
+
+    return {
+      count: pending.length,
+      ageThresholdSecs: threshold,
+      markets: pending.map((m) => ({
+        contractId: m.contractId,
+        status: m.status,
+        lastError: m.lastError ?? null,
+        expiry: m.expiry,
+        gracePeriodSecs: m.gracePeriodSecs,
+        updatedAt: m.updatedAt,
+        ageSecs: nowSec - m.updatedAt,
+        isStuck: nowSec - m.updatedAt > threshold,
+      })),
+    };
+  }
 }
 
 function parseLimit(raw: string | undefined): number {

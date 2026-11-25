@@ -11,6 +11,11 @@ import type { OnChainPerpetual } from './perpetual.types';
 
 const execFileAsync = promisify(execFile);
 
+/** Minimal surface of a SEP-41 contract client fetched via `Client.from` for a SAC — only the `balance` method is needed here. */
+interface SacBalanceClient {
+  balance(args: { id: string }): Promise<StellarContract.AssembledTransaction<bigint>>;
+}
+
 const CLI_RETRY_ATTEMPTS = 3;
 const CLI_RETRY_DELAY_MS = 2000;
 const RPC_RETRY_ATTEMPTS = 3;
@@ -618,7 +623,7 @@ export class StellarService {
       publicKey: this.keypair.publicKey(),
     });
     const tx = await this.withRpcRetry('balance', tokenContractId, () =>
-      (client as unknown as { balance(args: { id: string }): Promise<StellarContract.AssembledTransaction<bigint>> }).balance({
+      (client as unknown as SacBalanceClient).balance({
         id: holderAddress,
       }),
     );

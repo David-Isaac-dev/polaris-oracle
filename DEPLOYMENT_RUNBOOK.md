@@ -41,7 +41,6 @@ This document enumerates **all Fly.io secrets** required to run a fresh Polaris 
 | `RESEND_API_KEY` | Required only if `EMAIL_PROVIDER=resend`. |
 | `EMAIL_FROM` | `Polaris <login@polaris.app>` |
 | `SETTLE_ORACLE_TOLERANCE_BPS` | `150` |
-| `SETTLE_FRESHNESS_WINDOW_SECS` | `300` |
 | `WALLET_DEPLOY_MAX_PER_HOUR` | `5` |
 | `FAUCET_MAX_PER_HOUR` | `3` |
 | `FAUCET_AMOUNT_STROOPS` | `5000000000` (500 XLM) |

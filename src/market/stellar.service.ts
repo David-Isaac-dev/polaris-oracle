@@ -754,8 +754,7 @@ export class StellarService {
       // MarketFactoryService specifically — the vault capital that already
       // funded this real, open market would never get an entry in
       // MarketRepository, so it would never get settlement timers armed.
-      const message = (err as { stderr?: string; message: string }).stderr ?? (err as Error).message;
-      if (!/Error\(Contract, #2\)/.test(message)) throw err; // #2 = AlreadyInitialized, see contracts/market's Error enum
+      if (!StellarService.isAlreadyInitializedError(err)) throw err; // not AlreadyInitialized (#2)
       const state = await this.getMarketState(contractId);
       if (state.status !== 'Open') throw err; // genuinely uninitialized/broken — the AlreadyInitialized report was accurate, not a false negative
       this.logger.warn(
@@ -882,8 +881,7 @@ export class StellarService {
       // Same AlreadyInitialized reconciliation as `deployMarket` — see its
       // own comment for the full "CLI can report failure on a call that
       // actually succeeded on-chain" reasoning.
-      const message = (err as { stderr?: string; message: string }).stderr ?? (err as Error).message;
-      if (!/Error\(Contract, #2\)/.test(message)) throw err; // #2 = AlreadyInitialized, see contracts/perpetual's Error enum
+      if (!StellarService.isAlreadyInitializedError(err)) throw err; // not AlreadyInitialized (#2)
       const state = await this.getPerpetualState(contractId);
       if (state.status !== 'Open') throw err;
       this.logger.warn(
@@ -891,6 +889,17 @@ export class StellarService {
       );
       return { contractId, initTxHash: '' };
     }
+  }
+
+  /**
+   * Returns true when a CLI error message indicates AlreadyInitialized (#2 in
+   * every Polaris contract's Error enum). Extracted to keep the two reconcile
+   * catch blocks (deployMarket / deployPerpetual) consistent and independently
+   * testable.
+   */
+  static isAlreadyInitializedError(err: unknown): boolean {
+    const message = (err as { stderr?: string; message: string }).stderr ?? (err as Error).message;
+    return /Error\(Contract, #2\)/.test(message);
   }
 
   /** Runs a `stellar` CLI call, retrying past the transient failures in `TRANSIENT_CLI_ERROR`. Anything else fails immediately — retrying a genuine error (bad params, insufficient balance) would just waste time before failing anyway. */

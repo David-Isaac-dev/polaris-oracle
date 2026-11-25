@@ -48,7 +48,7 @@ function sleep(ms: number): Promise<void> {
 }
 
 /** The CLI's own `❌ error: ...` line if there is one — its stderr is otherwise multiple `ℹ️` progress lines followed by that summary, not necessarily last (a trailing diagnostic event dump can follow it). Falls back to the first line for a message with no such marker. */
-function summaryLine(message: string): string {
+export function summaryLine(message: string): string {
   const lines = message.trim().split('\n');
   return lines.find((line) => line.includes('❌')) ?? lines[0];
 }

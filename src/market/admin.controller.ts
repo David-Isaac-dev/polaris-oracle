@@ -142,6 +142,11 @@ export class AdminController {
     return { passkeyAddressesSeen: passkeyAddresses, emailWallets };
   }
 
+  /**
+   * Returns live Stellar network health merged with deployed contract addresses,
+   * WASM hashes, and oracle/deployer public keys — aggregated from StellarService
+   * and ConfigService so the dashboard has a single endpoint for infrastructure status.
+   */
   @Get('network')
   async network() {
     const health = await this.stellar.getNetworkHealth();

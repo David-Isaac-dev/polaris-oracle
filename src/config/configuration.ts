@@ -115,6 +115,13 @@ export interface AppConfig {
   mockRedstoneContract: string | undefined;
   redstoneMaxStalenessSecs: string;
   redstoneToleranceBps: number;
+  /**
+   * Ceiling (in stroops) on the inclusion fee `AuthRelayService` derives
+   * from `getFeeStats()` for sponsored relay/settlement transactions —
+   * caps sponsor cost under a fee spike instead of paying whatever the
+   * network's p70 happens to be.
+   */
+  maxInclusionFeeStroops: number;
 }
 
 import { randomBytes } from 'node:crypto';
@@ -244,4 +251,5 @@ export default (): AppConfig => ({
   mockRedstoneContract: process.env.MOCK_REDSTONE_CONTRACT,
   redstoneMaxStalenessSecs: process.env.REDSTONE_MAX_STALENESS_SECS ?? '600',
   redstoneToleranceBps: Number(process.env.REDSTONE_TOLERANCE_BPS ?? 150),
+  maxInclusionFeeStroops: Number(process.env.MAX_INCLUSION_FEE_STROOPS ?? 100_000),
 });

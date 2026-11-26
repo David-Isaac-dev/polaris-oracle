@@ -53,6 +53,7 @@ const CANCEL_RETRY_DELAY_MS = 60_000;
  * boundary, not the "already clearly overdue" immediate-fire branches in
  * `arm()`, which don't need it.
  */
+// shortcut: value confirmed on testnet; re-measure if Stellar ledger close time changes significantly
 const LEDGER_LAG_BUFFER_MS = 8_000;
 /**
  * `onModuleInit` used to call `arm()` for every watched/pending market

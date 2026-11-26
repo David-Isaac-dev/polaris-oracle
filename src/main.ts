@@ -70,14 +70,19 @@ async function bootstrap() {
   console.log(`polaris-oracle listening on [::]:${port}`);
 }
 
-bootstrap().catch((err: unknown) => {
-  // eslint-disable-next-line no-console
-  console.error('[bootstrap] Fatal startup error — exiting:', err instanceof Error ? err.message : String(err));
-  process.exit(1);
-});
-
+// Node ≥15 turns unhandled promise rejections into uncaught exceptions that
+// crash the process — but the message is a generic "unhandledRejection" dump.
+// Catch them here so we can log a structured message before the process exits,
+// making it clear what crashed (boot failure, misconfig, etc.) rather than
+// forcing the operator to parse a Node stack dump. (#168)
 process.on('unhandledRejection', (reason) => {
   // eslint-disable-next-line no-console
-  console.error('[process] Unhandled promise rejection:', reason instanceof Error ? reason.message : String(reason));
+  console.error('[polaris-oracle] unhandled promise rejection — process will exit:', reason);
+  process.exitCode = 1;
+});
+
+bootstrap().catch((err) => {
+  // eslint-disable-next-line no-console
+  console.error('[polaris-oracle] bootstrap() failed — process will exit:', err);
   process.exit(1);
 });

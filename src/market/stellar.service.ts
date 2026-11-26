@@ -394,19 +394,18 @@ export class StellarService {
    * (`reconcileWithChain` is how `MarketService` already handles that for
    * settle/cancel specifically; blindly retrying here could double-submit).
    */
-  private async withRpcRetry<T>(label: string, contractId: string, fn: () => Promise<T>): Promise<T> {
+  private async withRpcRetry<T>(fn: () => Promise<T>, label?: string): Promise<T> {
     let lastErr: unknown;
+    const prefix = label ? `[${label}] ` : '';
     for (let attempt = 1; attempt <= RPC_RETRY_ATTEMPTS; attempt++) {
       try {
         return await fn();
       } catch (err) {
         lastErr = err;
-        const msg = `RPC call failed [${label} @ ${contractId}] (attempt ${attempt}/${RPC_RETRY_ATTEMPTS}): ${(err as Error).message}`;
-        if (attempt === RPC_RETRY_ATTEMPTS) {
-          this.logger.error(msg);
-          throw err;
-        }
-        this.logger.warn(`${msg}, retrying`);
+        if (attempt === RPC_RETRY_ATTEMPTS) throw err;
+        this.logger.warn(
+          `${prefix}RPC call failed transiently (attempt ${attempt}/${RPC_RETRY_ATTEMPTS}), retrying: ${(err as Error).message}`,
+        );
         await sleep(RPC_RETRY_DELAY_MS);
       }
     }
@@ -417,19 +416,19 @@ export class StellarService {
 
   async getMarketState(contractId: string): Promise<OnChainMarket> {
     const client = this.marketClient(contractId);
-    const tx = await this.withRpcRetry('get_market', contractId, () => client.get_market());
+    const tx = await this.withRpcRetry(() => client.get_market(), `get_market(${contractId})`);
     return normalizeMarket(tx.result.unwrap());
   }
 
   async getPosition(contractId: string, address: string): Promise<[bigint, bigint]> {
     const client = this.marketClient(contractId);
-    const tx = await this.withRpcRetry('get_position', contractId, () => client.get_position({ addr: address }));
+    const tx = await this.withRpcRetry(() => client.get_position({ addr: address }), `get_position(${contractId})`);
     return tx.result;
   }
 
   async getPrice(contractId: string): Promise<{ yesBps: number; noBps: number }> {
     const client = this.marketClient(contractId);
-    const tx = await this.withRpcRetry('get_price', contractId, () => client.get_price());
+    const tx = await this.withRpcRetry(() => client.get_price(), `get_price(${contractId})`);
     const [yesBps, noBps] = tx.result.unwrap();
     return { yesBps, noBps };
   }
@@ -437,7 +436,7 @@ export class StellarService {
   /** Current effective swap fee (bps) per the market's volume-scaled fee curve — see `get_fee` in the contract. */
   async getFee(contractId: string): Promise<number> {
     const client = this.marketClient(contractId);
-    const tx = await this.withRpcRetry('get_fee', contractId, () => client.get_fee());
+    const tx = await this.withRpcRetry(() => client.get_fee(), `get_fee(${contractId})`);
     return tx.result.unwrap();
   }
 
@@ -445,26 +444,26 @@ export class StellarService {
 
   async getPerpetualState(contractId: string): Promise<OnChainPerpetual> {
     const client = this.perpetualClient(contractId);
-    const tx = await this.withRpcRetry('get_market', contractId, () => client.get_market());
+    const tx = await this.withRpcRetry(() => client.get_market(), `get_market/perpetual(${contractId})`);
     return normalizePerpetual(tx.result.unwrap());
   }
 
   async getPerpetualPosition(contractId: string, address: string): Promise<[bigint, bigint]> {
     const client = this.perpetualClient(contractId);
-    const tx = await this.withRpcRetry('get_position', contractId, () => client.get_position({ addr: address }));
+    const tx = await this.withRpcRetry(() => client.get_position({ addr: address }), `get_position/perpetual(${contractId})`);
     return tx.result;
   }
 
   async getPerpetualPrice(contractId: string): Promise<{ yesBps: number; noBps: number }> {
     const client = this.perpetualClient(contractId);
-    const tx = await this.withRpcRetry('get_price', contractId, () => client.get_price());
+    const tx = await this.withRpcRetry(() => client.get_price(), `get_price/perpetual(${contractId})`);
     const [yesBps, noBps] = tx.result.unwrap();
     return { yesBps, noBps };
   }
 
   async getPerpetualFee(contractId: string): Promise<number> {
     const client = this.perpetualClient(contractId);
-    const tx = await this.withRpcRetry('get_fee', contractId, () => client.get_fee());
+    const tx = await this.withRpcRetry(() => client.get_fee(), `get_fee/perpetual(${contractId})`);
     return tx.result.unwrap();
   }
 
@@ -531,12 +530,10 @@ export class StellarService {
   // with `tx_bad_seq`.
 
   async settle(contractId: string, payload: Buffer): Promise<string> {
-    return this.accountLock.run(async () => {
-      const client = this.marketClient(contractId);
-      const tx = await this.withRpcRetry(() => client.settle({ payload }));
-      const sent = await tx.signAndSend();
-      return sent.sendTransactionResponse?.hash ?? sent.getTransactionResponse?.txHash ?? '';
-    });
+    const client = this.marketClient(contractId);
+    const tx = await this.withRpcRetry(() => client.settle({ payload }), `settle(${contractId})`);
+    const sent = await tx.signAndSend();
+    return sent.sendTransactionResponse?.hash ?? sent.getTransactionResponse?.txHash ?? '';
   }
 
   /**
@@ -552,21 +549,17 @@ export class StellarService {
    * other settle failure (falls through to the cancel fallback).
    */
   async settleViaReflector(contractId: string): Promise<string> {
-    return this.accountLock.run(async () => {
-      const client = this.marketClient(contractId);
-      const tx = await this.withRpcRetry(() => client.settle_via_reflector());
-      const sent = await tx.signAndSend();
-      return sent.sendTransactionResponse?.hash ?? sent.getTransactionResponse?.txHash ?? '';
-    });
+    const client = this.marketClient(contractId);
+    const tx = await this.withRpcRetry(() => client.settle_via_reflector(), `settle_via_reflector(${contractId})`);
+    const sent = await tx.signAndSend();
+    return sent.sendTransactionResponse?.hash ?? sent.getTransactionResponse?.txHash ?? '';
   }
 
   async cancel(contractId: string): Promise<string> {
-    return this.accountLock.run(async () => {
-      const client = this.marketClient(contractId);
-      const tx = await this.withRpcRetry(() => client.cancel());
-      const sent = await tx.signAndSend();
-      return sent.sendTransactionResponse?.hash ?? sent.getTransactionResponse?.txHash ?? '';
-    });
+    const client = this.marketClient(contractId);
+    const tx = await this.withRpcRetry(() => client.cancel(), `cancel(${contractId})`);
+    const sent = await tx.signAndSend();
+    return sent.sendTransactionResponse?.hash ?? sent.getTransactionResponse?.txHash ?? '';
   }
 
   /**

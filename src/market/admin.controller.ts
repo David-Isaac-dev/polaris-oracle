@@ -189,42 +189,29 @@ export class AdminController {
   }
 
   /**
-   * Returns all markets in the `pending` state sorted by age (oldest first),
-   * with their `lastError` and time since last update — giving the operator
-   * enough context to triage without having to filter `GET /markets` manually.
+   * Surfaces stuck markets (#166): `pending` markets with a `lastError` and
+   * how long ago they last changed. `overview()` shows "pending: N" but
+   * gives no way to see which ones are stuck, why, or for how long — an
+   * operator cannot act on that alone.
    *
-   * "Stuck" here means: `pending` for more than `ageThresholdSecs` seconds
-   * since `updatedAt` (default 300 s / 5 min).  All pending markets are
-   * returned regardless; the `isStuck` flag helps the dashboard highlight
-   * the ones that need immediate attention.  Issue #166.
+   * "Age" is computed from `updatedAt` (seconds since epoch stored in SQLite
+   * INTEGER) so it stays meaningful even after a process restart resets any
+   * in-memory timer state.
    */
   @Get('pending-markets')
-  pendingMarkets(@Query('ageThresholdSecs') ageThresholdSecs?: string) {
-    const nowSec = Math.floor(Date.now() / 1000);
-    const threshold = (() => {
-      const n = Number(ageThresholdSecs);
-      return Number.isFinite(n) && n > 0 ? n : 300;
-    })();
-
+  pendingMarkets() {
+    const nowSecs = Math.floor(Date.now() / 1000);
     const pending = this.markets
       .getAll()
       .filter((m) => m.status === 'pending')
-      .sort((a, b) => a.updatedAt - b.updatedAt); // oldest first
-
-    return {
-      count: pending.length,
-      ageThresholdSecs: threshold,
-      markets: pending.map((m) => ({
+      .map((m) => ({
         contractId: m.contractId,
-        status: m.status,
         lastError: m.lastError ?? null,
-        expiry: m.expiry,
-        gracePeriodSecs: m.gracePeriodSecs,
+        ageSecs: nowSecs - m.updatedAt,
         updatedAt: m.updatedAt,
-        ageSecs: nowSec - m.updatedAt,
-        isStuck: nowSec - m.updatedAt > threshold,
-      })),
-    };
+      }))
+      .sort((a, b) => b.ageSecs - a.ageSecs);
+    return { total: pending.length, markets: pending };
   }
 }
 

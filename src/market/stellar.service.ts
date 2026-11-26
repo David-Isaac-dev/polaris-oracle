@@ -815,7 +815,13 @@ export class StellarService {
       // MarketFactoryService specifically — the vault capital that already
       // funded this real, open market would never get an entry in
       // MarketRepository, so it would never get settlement timers armed.
-      return this.reconcileAlreadyInitialized(err, contractId, () => this.getMarketState(contractId));
+      if (!StellarService.isAlreadyInitializedError(err)) throw err; // not AlreadyInitialized (#2)
+      const state = await this.getMarketState(contractId);
+      if (state.status !== 'Open') throw err; // genuinely uninitialized/broken — the AlreadyInitialized report was accurate, not a false negative
+      this.logger.warn(
+        `initialize on ${contractId} reported AlreadyInitialized but the contract is Open on-chain — treating as already succeeded, not a failure (no initTxHash available for this reconciled path)`,
+      );
+      return { contractId, initTxHash: '' };
     }
   }
 
@@ -938,33 +944,25 @@ export class StellarService {
       // Same AlreadyInitialized reconciliation as `deployMarket` — see its
       // own comment for the full "CLI can report failure on a call that
       // actually succeeded on-chain" reasoning.
-      return this.reconcileAlreadyInitialized(err, contractId, () => this.getPerpetualState(contractId));
+      if (!StellarService.isAlreadyInitializedError(err)) throw err; // not AlreadyInitialized (#2)
+      const state = await this.getPerpetualState(contractId);
+      if (state.status !== 'Open') throw err;
+      this.logger.warn(
+        `initialize on ${contractId} reported AlreadyInitialized but the contract is Open on-chain — treating as already succeeded, not a failure (no initTxHash available for this reconciled path)`,
+      );
+      return { contractId, initTxHash: '' };
     }
   }
 
   /**
-   * Shared AlreadyInitialized reconciliation for `deployMarket` and
-   * `deployPerpetual`: if the error is not `Error(Contract, #2)` it
-   * rethrows immediately; if the contract is not Open on-chain it rethrows
-   * too (genuine failure — the AlreadyInitialized report was accurate, not
-   * a false negative); otherwise logs a warning and returns a success result
-   * with an empty `initTxHash` (the CLI confirmed success on-chain but
-   * didn't return a hash on this code path). Both deploy methods share this
-   * helper so a single fix covers both paths.
+   * Returns true when a CLI error message indicates AlreadyInitialized (#2 in
+   * every Polaris contract's Error enum). Extracted to keep the two reconcile
+   * catch blocks (deployMarket / deployPerpetual) consistent and independently
+   * testable.
    */
-  private async reconcileAlreadyInitialized(
-    err: unknown,
-    contractId: string,
-    readState: () => Promise<{ status: string }>,
-  ): Promise<{ contractId: string; initTxHash: string }> {
+  static isAlreadyInitializedError(err: unknown): boolean {
     const message = (err as { stderr?: string; message: string }).stderr ?? (err as Error).message;
-    if (!/Error\(Contract, #2\)/.test(message)) throw err; // #2 = AlreadyInitialized
-    const state = await readState();
-    if (state.status !== 'Open') throw err;
-    this.logger.warn(
-      `initialize on ${contractId} reported AlreadyInitialized but the contract is Open on-chain — treating as already succeeded, not a failure (no initTxHash available for this reconciled path)`,
-    );
-    return { contractId, initTxHash: '' };
+    return /Error\(Contract, #2\)/.test(message);
   }
 
   /** Runs a `stellar` CLI call, retrying past the transient failures in `TRANSIENT_CLI_ERROR`. Anything else fails immediately — retrying a genuine error (bad params, insufficient balance) would just waste time before failing anyway. */

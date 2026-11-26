@@ -47,8 +47,14 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-/** The CLI's own `❌ error: ...` line if there is one — its stderr is otherwise multiple `ℹ️` progress lines followed by that summary, not necessarily last (a trailing diagnostic event dump can follow it). Falls back to the first line for a message with no such marker. */
-function summaryLine(message: string): string {
+/**
+ * Picks the CLI's own `❌ error: ...` summary line out of multi-line stderr.
+ * The ❌ line is not necessarily last — a trailing diagnostic event dump can
+ * follow it — so this searches all lines rather than taking the last one.
+ * Falls back to the first line when no ❌ marker is present.
+ * Exported so specs can test the three cases: ❌ found, no ❌, single-line.
+ */
+export function summaryLine(message: string): string {
   const lines = message.trim().split('\n');
   return lines.find((line) => line.includes('❌')) ?? lines[0];
 }
@@ -361,17 +367,19 @@ export class StellarService {
    * (`reconcileWithChain` is how `MarketService` already handles that for
    * settle/cancel specifically; blindly retrying here could double-submit).
    */
-  private async withRpcRetry<T>(fn: () => Promise<T>): Promise<T> {
+  private async withRpcRetry<T>(label: string, contractId: string, fn: () => Promise<T>): Promise<T> {
     let lastErr: unknown;
     for (let attempt = 1; attempt <= RPC_RETRY_ATTEMPTS; attempt++) {
       try {
         return await fn();
       } catch (err) {
         lastErr = err;
-        if (attempt === RPC_RETRY_ATTEMPTS) throw err;
-        this.logger.warn(
-          `RPC call failed transiently (attempt ${attempt}/${RPC_RETRY_ATTEMPTS}), retrying: ${(err as Error).message}`,
-        );
+        const msg = `RPC call failed [${label} @ ${contractId}] (attempt ${attempt}/${RPC_RETRY_ATTEMPTS}): ${(err as Error).message}`;
+        if (attempt === RPC_RETRY_ATTEMPTS) {
+          this.logger.error(msg);
+          throw err;
+        }
+        this.logger.warn(`${msg}, retrying`);
         await sleep(RPC_RETRY_DELAY_MS);
       }
     }
@@ -382,19 +390,19 @@ export class StellarService {
 
   async getMarketState(contractId: string): Promise<OnChainMarket> {
     const client = this.marketClient(contractId);
-    const tx = await this.withRpcRetry(() => client.get_market());
+    const tx = await this.withRpcRetry('get_market', contractId, () => client.get_market());
     return normalizeMarket(tx.result.unwrap());
   }
 
   async getPosition(contractId: string, address: string): Promise<[bigint, bigint]> {
     const client = this.marketClient(contractId);
-    const tx = await this.withRpcRetry(() => client.get_position({ addr: address }));
+    const tx = await this.withRpcRetry('get_position', contractId, () => client.get_position({ addr: address }));
     return tx.result;
   }
 
   async getPrice(contractId: string): Promise<{ yesBps: number; noBps: number }> {
     const client = this.marketClient(contractId);
-    const tx = await this.withRpcRetry(() => client.get_price());
+    const tx = await this.withRpcRetry('get_price', contractId, () => client.get_price());
     const [yesBps, noBps] = tx.result.unwrap();
     return { yesBps, noBps };
   }
@@ -402,7 +410,7 @@ export class StellarService {
   /** Current effective swap fee (bps) per the market's volume-scaled fee curve — see `get_fee` in the contract. */
   async getFee(contractId: string): Promise<number> {
     const client = this.marketClient(contractId);
-    const tx = await this.withRpcRetry(() => client.get_fee());
+    const tx = await this.withRpcRetry('get_fee', contractId, () => client.get_fee());
     return tx.result.unwrap();
   }
 
@@ -410,26 +418,26 @@ export class StellarService {
 
   async getPerpetualState(contractId: string): Promise<OnChainPerpetual> {
     const client = this.perpetualClient(contractId);
-    const tx = await this.withRpcRetry(() => client.get_market());
+    const tx = await this.withRpcRetry('get_market', contractId, () => client.get_market());
     return normalizePerpetual(tx.result.unwrap());
   }
 
   async getPerpetualPosition(contractId: string, address: string): Promise<[bigint, bigint]> {
     const client = this.perpetualClient(contractId);
-    const tx = await this.withRpcRetry(() => client.get_position({ addr: address }));
+    const tx = await this.withRpcRetry('get_position', contractId, () => client.get_position({ addr: address }));
     return tx.result;
   }
 
   async getPerpetualPrice(contractId: string): Promise<{ yesBps: number; noBps: number }> {
     const client = this.perpetualClient(contractId);
-    const tx = await this.withRpcRetry(() => client.get_price());
+    const tx = await this.withRpcRetry('get_price', contractId, () => client.get_price());
     const [yesBps, noBps] = tx.result.unwrap();
     return { yesBps, noBps };
   }
 
   async getPerpetualFee(contractId: string): Promise<number> {
     const client = this.perpetualClient(contractId);
-    const tx = await this.withRpcRetry(() => client.get_fee());
+    const tx = await this.withRpcRetry('get_fee', contractId, () => client.get_fee());
     return tx.result.unwrap();
   }
 
@@ -443,7 +451,7 @@ export class StellarService {
    */
   async terminatePerpetual(contractId: string): Promise<string> {
     const client = this.buildClient<PerpetualContractMethods>(perpetualSpec, contractId, this.deployerKeypair);
-    const tx = await this.withRpcRetry(() => client.terminate({ admin: this.deployerKeypair.publicKey() }));
+    const tx = await this.withRpcRetry('terminate', contractId, () => client.terminate({ admin: this.deployerKeypair.publicKey() }));
     const sent = await tx.signAndSend();
     return sent.sendTransactionResponse?.hash ?? sent.getTransactionResponse?.txHash ?? '';
   }
@@ -465,7 +473,7 @@ export class StellarService {
     const client = this.mockRedstoneClient(contractId);
     const price = priceCents * 10n ** BigInt(decimals - 2);
     const timestamp = BigInt(Math.floor(Date.now() / 1000));
-    const tx = await this.withRpcRetry(() => client.set_price({ price, timestamp }));
+    const tx = await this.withRpcRetry('set_price', contractId, () => client.set_price({ price, timestamp }));
     const sent = await tx.signAndSend();
     return sent.sendTransactionResponse?.hash ?? sent.getTransactionResponse?.txHash ?? '';
   }
@@ -473,7 +481,7 @@ export class StellarService {
   /** Permissionless at the contract level (see `record_price_checkpoint`'s own doc comment in `polaris-contracts`) — signed here by this process's own keypair purely because *some* account has to pay the fee, same as `settle`/`cancel`. */
   async recordPriceCheckpoint(contractId: string, payload: Buffer): Promise<string> {
     const client = this.perpetualClient(contractId);
-    const tx = await this.withRpcRetry(() => client.record_price_checkpoint({ payload }));
+    const tx = await this.withRpcRetry('record_price_checkpoint', contractId, () => client.record_price_checkpoint({ payload }));
     const sent = await tx.signAndSend();
     return sent.sendTransactionResponse?.hash ?? sent.getTransactionResponse?.txHash ?? '';
   }
@@ -482,7 +490,7 @@ export class StellarService {
 
   async settle(contractId: string, payload: Buffer): Promise<string> {
     const client = this.marketClient(contractId);
-    const tx = await this.withRpcRetry(() => client.settle({ payload }));
+    const tx = await this.withRpcRetry('settle', contractId, () => client.settle({ payload }));
     const sent = await tx.signAndSend();
     return sent.sendTransactionResponse?.hash ?? sent.getTransactionResponse?.txHash ?? '';
   }
@@ -501,14 +509,14 @@ export class StellarService {
    */
   async settleViaReflector(contractId: string): Promise<string> {
     const client = this.marketClient(contractId);
-    const tx = await this.withRpcRetry(() => client.settle_via_reflector());
+    const tx = await this.withRpcRetry('settle_via_reflector', contractId, () => client.settle_via_reflector());
     const sent = await tx.signAndSend();
     return sent.sendTransactionResponse?.hash ?? sent.getTransactionResponse?.txHash ?? '';
   }
 
   async cancel(contractId: string): Promise<string> {
     const client = this.marketClient(contractId);
-    const tx = await this.withRpcRetry(() => client.cancel());
+    const tx = await this.withRpcRetry('cancel', contractId, () => client.cancel());
     const sent = await tx.signAndSend();
     return sent.sendTransactionResponse?.hash ?? sent.getTransactionResponse?.txHash ?? '';
   }
@@ -529,7 +537,7 @@ export class StellarService {
    */
   async deployWallet(factoryContractId: string, publicKey: Buffer): Promise<string> {
     const client = this.factoryClient(factoryContractId);
-    const tx = await this.withRpcRetry(() => client.deploy({ public_key: publicKey }));
+    const tx = await this.withRpcRetry('deploy', factoryContractId, () => client.deploy({ public_key: publicKey }));
     const sent = await tx.signAndSend();
     return sent.result.unwrap();
   }
@@ -546,7 +554,7 @@ export class StellarService {
    */
   async initializeFactory(factoryContractId: string, walletWasmHash: Buffer, origin: Buffer): Promise<string> {
     const client = this.factoryClient(factoryContractId);
-    const tx = await this.withRpcRetry(() =>
+    const tx = await this.withRpcRetry('initialize', factoryContractId, () =>
       client.initialize({ admin: this.oraclePublicKey, wasm_hash: walletWasmHash, origin }),
     );
     const sent = await tx.signAndSend();
@@ -565,7 +573,7 @@ export class StellarService {
    */
   async resolveWallet(factoryContractId: string, publicKey: Buffer): Promise<string> {
     const client = this.factoryClient(factoryContractId);
-    const tx = await this.withRpcRetry(() => client.resolve({ public_key: publicKey }));
+    const tx = await this.withRpcRetry('resolve', factoryContractId, () => client.resolve({ public_key: publicKey }));
     return tx.result;
   }
 
@@ -580,14 +588,14 @@ export class StellarService {
   /** Available capital, in stroops — checked before `MarketFactoryService` withdraws to seed a new market, so an underfunded vault fails loudly instead of a partial/confusing on-chain error. */
   async vaultBalance(vaultContractId: string): Promise<bigint> {
     const client = this.vaultClient(vaultContractId);
-    const tx = await this.withRpcRetry(() => client.get_balance());
+    const tx = await this.withRpcRetry('get_balance', vaultContractId, () => client.get_balance());
     return tx.result.unwrap();
   }
 
   /** Lifetime deposits, in stroops — always `>= vaultBalance` (this v1 vault has no LP-share accounting yet, see the contract's own doc comment). Powers the admin dashboard's Treasury view. */
   async vaultTotalDeposited(vaultContractId: string): Promise<bigint> {
     const client = this.vaultClient(vaultContractId);
-    const tx = await this.withRpcRetry(() => client.get_total_deposited());
+    const tx = await this.withRpcRetry('get_total_deposited', vaultContractId, () => client.get_total_deposited());
     return tx.result.unwrap();
   }
 
@@ -615,7 +623,7 @@ export class StellarService {
       allowHttp: this.rpcUrl.startsWith('http://'),
       publicKey: this.keypair.publicKey(),
     });
-    const tx = await this.withRpcRetry(() =>
+    const tx = await this.withRpcRetry('balance', tokenContractId, () =>
       (client as unknown as { balance(args: { id: string }): Promise<StellarContract.AssembledTransaction<bigint>> }).balance({
         id: holderAddress,
       }),
@@ -626,7 +634,7 @@ export class StellarService {
   /** Moves `amount` stroops from the vault to this process's own account, to fund a new market's `initial_liquidity` — the same account `deployMarket` already transfers that liquidity from. */
   async vaultWithdraw(vaultContractId: string, amount: bigint): Promise<string> {
     const client = this.vaultClient(vaultContractId);
-    const tx = await this.withRpcRetry(() =>
+    const tx = await this.withRpcRetry('withdraw', vaultContractId, () =>
       client.withdraw({
         admin: this.oraclePublicKey,
         to: this.oraclePublicKey,

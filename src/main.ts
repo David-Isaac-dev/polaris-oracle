@@ -47,4 +47,14 @@ async function bootstrap() {
   console.log(`polaris-oracle listening on [::]:${port}`);
 }
 
-bootstrap();
+bootstrap().catch((err: unknown) => {
+  // eslint-disable-next-line no-console
+  console.error('[bootstrap] Fatal startup error — exiting:', err instanceof Error ? err.message : String(err));
+  process.exit(1);
+});
+
+process.on('unhandledRejection', (reason) => {
+  // eslint-disable-next-line no-console
+  console.error('[process] Unhandled promise rejection:', reason instanceof Error ? reason.message : String(reason));
+  process.exit(1);
+});

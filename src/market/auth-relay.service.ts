@@ -109,7 +109,7 @@ export class AuthRelayService {
       throw new BadRequestException(`simulation failed: ${sim.error}`);
     }
     if (!rpc.Api.isSimulationSuccess(sim)) {
-      throw new BadRequestException('simulation did not succeed');
+      throw new BadRequestException(`simulation did not succeed (status: ${(sim as { status?: string }).status ?? 'unknown'} — expected success, got restore?`);
     }
 
     const entries = sim.result?.auth ?? [];

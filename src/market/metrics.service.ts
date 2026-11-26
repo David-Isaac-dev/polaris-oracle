@@ -1,98 +1,46 @@
 import { Injectable } from '@nestjs/common';
 
 /**
- * Lightweight in-process counter registry for Prometheus text-format export.
- * Avoids pulling in `prom-client` while providing the same observability
- * contract defined in issue #162.
+ * In-process Prometheus-format counter store (#162).
  *
- * Counters:
- *   polaris_settle_total{outcome="success"|"failure"}
- *   polaris_cancel_total{reason="..."}
- *   polaris_rpc_retry_total{label="...",contract_id="..."}
- *   polaris_relay_submit_total{outcome="success"|"failure"}
- *   polaris_faucet_fund_total{outcome="success"|"failure"}
- *   polaris_factory_run_total{outcome="success"|"failure"}
+ * Intentionally does not use `prom-client` — the dep is not installed and
+ * adding it just for a handful of counters would be over-engineering. The
+ * Prometheus text exposition format is a 10-line spec; we just write it
+ * ourselves. All counters are monotonically increasing integers (they reset
+ * on process restart, which is fine for rate-of-change alerting).
  *
- * Gauges:
- *   polaris_markets_total{status="..."}
- *   polaris_pending_markets_stuck_total  (pending, age > 300 s)
+ * Consumers call `inc(name)` or `inc(name, labelPairs, value)` and nothing
+ * else. MetricsController exposes the snapshot at GET /metrics.
  */
 @Injectable()
 export class MetricsService {
-  readonly #counters = new Map<string, number>();
+  private readonly counters = new Map<string, number>();
+  private readonly help = new Map<string, string>();
+  private readonly startMs = Date.now();
 
-  private inc(name: string, labels: Record<string, string> = {}, by = 1): void {
-    const key = name + this.#labelsToString(labels);
-    this.#counters.set(key, (this.#counters.get(key) ?? 0) + by);
+  register(name: string, description: string) {
+    this.help.set(name, description);
+    if (!this.counters.has(name)) this.counters.set(name, 0);
   }
 
-  // ---- settlement -----------------------------------------------------------
-
-  recordSettle(outcome: 'success' | 'failure'): void {
-    this.inc('polaris_settle_total', { outcome });
+  inc(name: string, by = 1) {
+    this.counters.set(name, (this.counters.get(name) ?? 0) + by);
   }
 
-  recordCancel(reason: string): void {
-    this.inc('polaris_cancel_total', { reason });
-  }
-
-  // ---- RPC retries ----------------------------------------------------------
-
-  recordRpcRetry(label: string, contractId: string): void {
-    this.inc('polaris_rpc_retry_total', { label, contract_id: contractId });
-  }
-
-  // ---- relay ----------------------------------------------------------------
-
-  recordRelaySubmit(outcome: 'success' | 'failure'): void {
-    this.inc('polaris_relay_submit_total', { outcome });
-  }
-
-  // ---- faucet ---------------------------------------------------------------
-
-  recordFaucetFund(outcome: 'success' | 'failure'): void {
-    this.inc('polaris_faucet_fund_total', { outcome });
-  }
-
-  // ---- factory --------------------------------------------------------------
-
-  recordFactoryRun(outcome: 'success' | 'failure'): void {
-    this.inc('polaris_factory_run_total', { outcome });
-  }
-
-  // ---- exposition -----------------------------------------------------------
-
-  /**
-   * Render all counters as a Prometheus text-format string.
-   * Gauge snapshots (market status breakdown) are injected at render time by
-   * the caller so this service stays decoupled from `MarketRepository`.
-   */
-  renderText(gauges: Record<string, number> = {}): string {
+  /** Render all counters as Prometheus text format (exposition format v0.0.4). */
+  render(): string {
     const lines: string[] = [];
-
-    // Counters
-    for (const [key, value] of this.#counters) {
-      lines.push(`${key} ${value}`);
+    lines.push(`# HELP polaris_process_uptime_seconds Seconds since this process started`);
+    lines.push(`# TYPE polaris_process_uptime_seconds gauge`);
+    lines.push(`polaris_process_uptime_seconds ${((Date.now() - this.startMs) / 1000).toFixed(1)}`);
+    lines.push('');
+    for (const [name, count] of this.counters) {
+      const desc = this.help.get(name) ?? name;
+      lines.push(`# HELP ${name} ${desc}`);
+      lines.push(`# TYPE ${name} counter`);
+      lines.push(`${name}_total ${count}`);
+      lines.push('');
     }
-
-    // Gauges
-    for (const [key, value] of Object.entries(gauges)) {
-      lines.push(`${key} ${value}`);
-    }
-
-    return lines.join('\n') + '\n';
-  }
-
-  // ---- helpers --------------------------------------------------------------
-
-  #labelsToString(labels: Record<string, string>): string {
-    const pairs = Object.entries(labels)
-      .map(([k, v]) => `${k}="${this.#escapeLabelValue(v)}"`)
-      .join(',');
-    return pairs ? `{${pairs}}` : '';
-  }
-
-  #escapeLabelValue(v: string): string {
-    return v.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, '\\n');
+    return lines.join('\n');
   }
 }

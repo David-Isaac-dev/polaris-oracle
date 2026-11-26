@@ -1,44 +1,20 @@
-import { Controller, Get, Header, UseGuards } from '@nestjs/common';
-import { AdminGuard } from './admin.guard';
-import { MarketRepository } from './market.repository';
+import { Controller, Get, Header } from '@nestjs/common';
 import { MetricsService } from './metrics.service';
 
 /**
- * Exposes a Prometheus text-format /metrics endpoint (issue #162).
- * Gated by AdminGuard so it is never publicly reachable — same protection
- * as every other admin-only read endpoint on this server.
+ * Exposes GET /metrics in Prometheus text exposition format (#162).
+ *
+ * Not `AdminGuard`-gated by design: standard scrape configs expect a
+ * publicly reachable `/metrics` path. Restrict at the network/ingress layer
+ * if needed (firewall rules, Railway's private network, etc.).
  */
 @Controller('metrics')
-@UseGuards(AdminGuard)
 export class MetricsController {
-  constructor(
-    private readonly metrics: MetricsService,
-    private readonly markets: MarketRepository,
-  ) {}
+  constructor(private readonly metrics: MetricsService) {}
 
   @Get()
   @Header('Content-Type', 'text/plain; version=0.0.4; charset=utf-8')
-  collect(): string {
-    // Build gauge snapshot from live market repository
-    const allMarkets = this.markets.getAll();
-    const statusCounts: Record<string, number> = {};
-    for (const m of allMarkets) {
-      statusCounts[m.status] = (statusCounts[m.status] ?? 0) + 1;
-    }
-
-    const nowSec = Math.floor(Date.now() / 1000);
-    const stuckThresholdSecs = 300;
-    const stuckCount = allMarkets.filter(
-      (m) => m.status === 'pending' && nowSec - m.updatedAt > stuckThresholdSecs,
-    ).length;
-
-    const gauges: Record<string, number> = {
-      [`polaris_pending_markets_stuck_total`]: stuckCount,
-    };
-    for (const [status, count] of Object.entries(statusCounts)) {
-      gauges[`polaris_markets_total{status="${status}"}`] = count;
-    }
-
-    return this.metrics.renderText(gauges);
+  scrape(): string {
+    return this.metrics.render();
   }
 }

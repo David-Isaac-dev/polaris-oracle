@@ -47,8 +47,14 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-/** The CLI's own `❌ error: ...` line if there is one — its stderr is otherwise multiple `ℹ️` progress lines followed by that summary, not necessarily last (a trailing diagnostic event dump can follow it). Falls back to the first line for a message with no such marker. */
-function summaryLine(message: string): string {
+/**
+ * Picks the CLI's own `❌ error: ...` summary line out of multi-line stderr.
+ * The ❌ line is not necessarily last — a trailing diagnostic event dump can
+ * follow it — so this searches all lines rather than taking the last one.
+ * Falls back to the first line when no ❌ marker is present.
+ * Exported so specs can test the three cases: ❌ found, no ❌, single-line.
+ */
+export function summaryLine(message: string): string {
   const lines = message.trim().split('\n');
   return lines.find((line) => line.includes('❌')) ?? lines[0];
 }

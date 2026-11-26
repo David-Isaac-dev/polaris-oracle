@@ -148,9 +148,11 @@ export class EmailAuthService {
    * Returns the custodial Stellar wallet address for `email`, deploying a new
    * secp256r1 smart-wallet via `StellarService.deployWallet` on first call.
    * The generated private key is encrypted at rest (`emailWalletEncKeyHex`)
-   * before being stored; the plaintext never leaves memory. Best-effort
-   * Friendbot funding is attempted for new wallets so the first trade doesn't
-   * fail on insufficient balance — funding errors are logged but never thrown.
+   * before being stored; the plaintext never leaves memory. The deployed wallet
+   * uses the same `smart-wallet-factory` path as a passkey wallet, so it is
+   * indistinguishable on-chain. Best-effort Friendbot funding is attempted for
+   * new wallets so the first trade doesn't fail on insufficient balance —
+   * funding errors are logged but never thrown.
    */
   private async getOrCreateWallet(email: string): Promise<string> {
     const existing = this.repo.getWallet(email);

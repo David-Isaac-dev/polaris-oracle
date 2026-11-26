@@ -26,7 +26,6 @@ export interface AppConfig {
   faucetMaxPerHour: number;
   /** IP-keyed limit on POST /wallets/deploy — mitigates, doesn't close, the known unauthenticated-endpoint gap (see WalletDeployRateLimiter). */
   walletDeployMaxPerHour: number;
-  settleFreshnessWindowSecs: number;
   emailWalletEncKeyHex: string;
   sessionJwtSecret: string;
   sessionTtlSecs: number;
@@ -211,7 +210,6 @@ export default (): AppConfig => ({
   faucetAmountStroops: process.env.FAUCET_AMOUNT_STROOPS ?? '5000000000', // 500 XLM
   faucetMaxPerHour: Number(process.env.FAUCET_MAX_PER_HOUR ?? 3),
   walletDeployMaxPerHour: Number(process.env.WALLET_DEPLOY_MAX_PER_HOUR ?? 5),
-  settleFreshnessWindowSecs: Number(process.env.SETTLE_FRESHNESS_WINDOW_SECS ?? 300),
   // 32 bytes hex = AES-256-GCM key, encrypting custodial private keys at rest.
   emailWalletEncKeyHex: devFallbackSecret('EMAIL_WALLET_ENC_KEY', 32),
   sessionJwtSecret: devFallbackSecret('SESSION_JWT_SECRET', 32),

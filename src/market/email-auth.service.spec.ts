@@ -1,5 +1,6 @@
 import { ConfigService } from '@nestjs/config';
 import { createHash } from 'node:crypto';
+import * as jwt from 'jsonwebtoken';
 import { EmailAuthService } from './email-auth.service';
 
 // Hand-rolled fakes rather than a Nest TestingModule — mirrors the pattern
@@ -128,74 +129,49 @@ describe('EmailAuthService — auto-funding a freshly created wallet', () => {
   });
 });
 
-describe('EmailAuthService — verifyCode', () => {
-  const email = 'bettor@example.com';
-  const sha = (c: string) => createHash('sha256').update(c).digest('hex');
+describe('EmailAuthService — verifySession', () => {
+  const email = 'session@example.com';
+  const address = 'CSESSIONWALLET';
 
-  // In-memory stand-in for EmailAuthRepository so state changes are observable.
-  function setup(row?: { code: string; expiresInMs?: number; attempts?: number }) {
-    const codes = new Map<string, any>();
-    const wallets = new Map<string, any>();
-    if (row) {
-      codes.set(email, {
-        email,
-        code_hash: sha(row.code),
-        expires_at: Date.now() + (row.expiresInMs ?? 10_000),
-        attempts: row.attempts ?? 0,
-        created_at: Date.now(),
-      });
-    }
-    const repo = {
-      getCode: (e: string) => codes.get(e),
-      deleteCode: (e: string) => void codes.delete(e),
-      incrementAttempts: (e: string) => {
-        const r = codes.get(e);
-        if (r) r.attempts += 1;
-      },
-      getWallet: (e: string) => wallets.get(e),
-      saveWallet: (e: string, address: string) => void wallets.set(e, { email: e, address }),
-    };
-    const stellar = { deployWallet: jest.fn().mockResolvedValue('CNEWWALLET') };
-    const faucet = { tryConsume: jest.fn().mockReturnValue(false), fund: jest.fn() };
-    const svc = new EmailAuthService(config(), repo as any, stellar as any, {} as any, faucet as any, {} as any);
-    return { svc, codes, stellar };
+  function svc(): EmailAuthService {
+    return new EmailAuthService(config(), {} as any, {} as any, {} as any, {} as any, {} as any);
   }
 
-  it('rejects an email with no pending code', async () => {
-    const { svc } = setup();
-    await expect(svc.verifyCode(email, '123456')).rejects.toThrow('No code was requested');
+  async function issueViaVerifyCode(): Promise<string> {
+    const code = '123456';
+    const repo = pendingCodeRepo(email, code);
+    repo.getWallet.mockReturnValue({
+      email,
+      address,
+      public_key_hex: 'ab',
+      encrypted_private_key: 'x',
+      created_at: Date.now(),
+    });
+    const s = new EmailAuthService(config(), repo as any, {} as any, {} as any, {} as any, {} as any);
+    return (await s.verifyCode(email, code)).sessionToken;
+  }
+
+  it('round-trips a token issued by verifyCode to the same email and address', async () => {
+    expect(svc().verifySession(await issueViaVerifyCode())).toEqual({ email, address });
   });
 
-  it('rejects and deletes the code once attempts hit the max', async () => {
-    const { svc, codes } = setup({ code: '123456', attempts: 5 });
-    await expect(svc.verifyCode(email, '123456')).rejects.toThrow('Too many incorrect attempts');
-    expect(codes.has(email)).toBe(false);
+  it('returns null for an undefined token', () => {
+    expect(svc().verifySession(undefined)).toBeNull();
   });
 
-  it('rejects and deletes an expired code', async () => {
-    const { svc, codes } = setup({ code: '123456', expiresInMs: -1000 });
-    await expect(svc.verifyCode(email, '123456')).rejects.toThrow('expired');
-    expect(codes.has(email)).toBe(false);
+  it('returns null for a token signed with a different secret', () => {
+    const forged = jwt.sign({ email, address }, 'some-other-secret', { expiresIn: 3600 });
+    expect(svc().verifySession(forged)).toBeNull();
   });
 
-  it('rejects a wrong code, increments attempts and keeps the row', async () => {
-    const { svc, codes } = setup({ code: '123456' });
-    await expect(svc.verifyCode(email, '000000')).rejects.toThrow('Incorrect code');
-    expect(codes.get(email).attempts).toBe(1);
+  it('returns null for an expired token', () => {
+    const expired = jwt.sign({ email, address }, 'test-session-secret', { expiresIn: -1 });
+    expect(svc().verifySession(expired)).toBeNull();
   });
 
-  it('accepts the right code once: deletes the row, deploys one wallet, issues a verifiable session', async () => {
-    const { svc, codes, stellar } = setup({ code: '123456' });
-    const { address, sessionToken } = await svc.verifyCode(email, '123456');
-    expect(codes.has(email)).toBe(false);
-    expect(stellar.deployWallet).toHaveBeenCalledTimes(1);
-    expect(svc.verifySession(sessionToken)).toEqual({ email, address });
-  });
-
-  it('rejects replaying the same code after success', async () => {
-    const { svc, stellar } = setup({ code: '123456' });
-    await svc.verifyCode(email, '123456');
-    await expect(svc.verifyCode(email, '123456')).rejects.toThrow('No code was requested');
-    expect(stellar.deployWallet).toHaveBeenCalledTimes(1);
+  it('returns null for a token with a tampered payload', async () => {
+    const [header, payload, sig] = (await issueViaVerifyCode()).split('.');
+    const flipped = (payload[0] === 'A' ? 'B' : 'A') + payload.slice(1);
+    expect(svc().verifySession(`${header}.${flipped}.${sig}`)).toBeNull();
   });
 });

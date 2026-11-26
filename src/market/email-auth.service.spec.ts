@@ -127,3 +127,75 @@ describe('EmailAuthService — auto-funding a freshly created wallet', () => {
     expect(faucet.tryConsume).not.toHaveBeenCalled();
   });
 });
+
+describe('EmailAuthService — verifyCode', () => {
+  const email = 'bettor@example.com';
+  const sha = (c: string) => createHash('sha256').update(c).digest('hex');
+
+  // In-memory stand-in for EmailAuthRepository so state changes are observable.
+  function setup(row?: { code: string; expiresInMs?: number; attempts?: number }) {
+    const codes = new Map<string, any>();
+    const wallets = new Map<string, any>();
+    if (row) {
+      codes.set(email, {
+        email,
+        code_hash: sha(row.code),
+        expires_at: Date.now() + (row.expiresInMs ?? 10_000),
+        attempts: row.attempts ?? 0,
+        created_at: Date.now(),
+      });
+    }
+    const repo = {
+      getCode: (e: string) => codes.get(e),
+      deleteCode: (e: string) => void codes.delete(e),
+      incrementAttempts: (e: string) => {
+        const r = codes.get(e);
+        if (r) r.attempts += 1;
+      },
+      getWallet: (e: string) => wallets.get(e),
+      saveWallet: (e: string, address: string) => void wallets.set(e, { email: e, address }),
+    };
+    const stellar = { deployWallet: jest.fn().mockResolvedValue('CNEWWALLET') };
+    const faucet = { tryConsume: jest.fn().mockReturnValue(false), fund: jest.fn() };
+    const svc = new EmailAuthService(config(), repo as any, stellar as any, {} as any, faucet as any, {} as any);
+    return { svc, codes, stellar };
+  }
+
+  it('rejects an email with no pending code', async () => {
+    const { svc } = setup();
+    await expect(svc.verifyCode(email, '123456')).rejects.toThrow('No code was requested');
+  });
+
+  it('rejects and deletes the code once attempts hit the max', async () => {
+    const { svc, codes } = setup({ code: '123456', attempts: 5 });
+    await expect(svc.verifyCode(email, '123456')).rejects.toThrow('Too many incorrect attempts');
+    expect(codes.has(email)).toBe(false);
+  });
+
+  it('rejects and deletes an expired code', async () => {
+    const { svc, codes } = setup({ code: '123456', expiresInMs: -1000 });
+    await expect(svc.verifyCode(email, '123456')).rejects.toThrow('expired');
+    expect(codes.has(email)).toBe(false);
+  });
+
+  it('rejects a wrong code, increments attempts and keeps the row', async () => {
+    const { svc, codes } = setup({ code: '123456' });
+    await expect(svc.verifyCode(email, '000000')).rejects.toThrow('Incorrect code');
+    expect(codes.get(email).attempts).toBe(1);
+  });
+
+  it('accepts the right code once: deletes the row, deploys one wallet, issues a verifiable session', async () => {
+    const { svc, codes, stellar } = setup({ code: '123456' });
+    const { address, sessionToken } = await svc.verifyCode(email, '123456');
+    expect(codes.has(email)).toBe(false);
+    expect(stellar.deployWallet).toHaveBeenCalledTimes(1);
+    expect(svc.verifySession(sessionToken)).toEqual({ email, address });
+  });
+
+  it('rejects replaying the same code after success', async () => {
+    const { svc, stellar } = setup({ code: '123456' });
+    await svc.verifyCode(email, '123456');
+    await expect(svc.verifyCode(email, '123456')).rejects.toThrow('No code was requested');
+    expect(stellar.deployWallet).toHaveBeenCalledTimes(1);
+  });
+});

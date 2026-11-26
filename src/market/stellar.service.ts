@@ -883,9 +883,11 @@ export class StellarService {
    * Shared AlreadyInitialized reconciliation for `deployMarket` and
    * `deployPerpetual`: if the error is not `Error(Contract, #2)` it
    * rethrows immediately; if the contract is not Open on-chain it rethrows
-   * too (genuine failure); otherwise logs a warning and returns a success
-   * result with an empty `initTxHash` (the CLI confirmed success on-chain
-   * but didn't return a hash on this code path).
+   * too (genuine failure — the AlreadyInitialized report was accurate, not
+   * a false negative); otherwise logs a warning and returns a success result
+   * with an empty `initTxHash` (the CLI confirmed success on-chain but
+   * didn't return a hash on this code path). Both deploy methods share this
+   * helper so a single fix covers both paths.
    */
   private async reconcileAlreadyInitialized(
     err: unknown,

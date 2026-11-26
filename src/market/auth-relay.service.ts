@@ -96,6 +96,29 @@ export class AuthRelayService {
     this.accountLock = getAccountLock(secret);
   }
 
+  /**
+   * Inclusion fee for a sponsored transaction, derived from the network's
+   * current fee climate rather than hardcoded `BASE_FEE` — under surge
+   * pricing, a flat minimum fee just sits unincluded until the relay's
+   * poll gives up, with no clear cause to the caller. Uses the p70 bucket
+   * of `getFeeStats()`'s Soroban inclusion-fee distribution, capped by
+   * `maxInclusionFeeStroops` so a fee spike can't blow sponsor cost out
+   * unbounded. Falls back to `BASE_FEE` if the stats call itself fails —
+   * this must never become a new way to block a sponsored transaction.
+   */
+  private async inclusionFee(): Promise<string> {
+    const cap = this.config.get<number>('maxInclusionFeeStroops') ?? 100_000;
+    try {
+      const stats = await this.server.getFeeStats();
+      const p70 = Number(stats.sorobanInclusionFee?.p70 ?? BASE_FEE);
+      const fee = Math.max(Number(BASE_FEE), Math.min(p70, cap));
+      return String(fee);
+    } catch (err) {
+      this.logger.warn(`getFeeStats failed, falling back to BASE_FEE: ${(err as Error).message}`);
+      return BASE_FEE;
+    }
+  }
+
   async prepare(
     walletAddress: string,
     contractId: string,
@@ -108,7 +131,7 @@ export class AuthRelayService {
 
     const sourceAccount = await this.server.getAccount(this.keypair.publicKey());
     const tx = new TransactionBuilder(sourceAccount, {
-      fee: BASE_FEE,
+      fee: await this.inclusionFee(),
       networkPassphrase: this.networkPassphrase,
     })
       .addOperation(op)
@@ -120,7 +143,7 @@ export class AuthRelayService {
       throw new BadRequestException(`simulation failed: ${sim.error}`);
     }
     if (!rpc.Api.isSimulationSuccess(sim)) {
-      throw new BadRequestException('simulation did not succeed');
+      throw new BadRequestException(`simulation did not succeed (status: ${(sim as { status?: string }).status ?? 'unknown'} — expected success, got restore?`);
     }
 
     const entries = sim.result?.auth ?? [];
@@ -222,9 +245,11 @@ export class AuthRelayService {
       if (res.status !== rpc.Api.GetTransactionStatus.NOT_FOUND) {
         return res;
       }
-      await new Promise((resolve) => setTimeout(resolve, delayMs));
+      if (i < attempts - 1) {
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+      }
     }
-    throw new Error(`transaction ${txHash} not confirmed after ${attempts} attempts`);
+    return { status: rpc.Api.GetTransactionStatus.NOT_FOUND } as rpc.Api.GetTransactionResponse;
   }
 }
 

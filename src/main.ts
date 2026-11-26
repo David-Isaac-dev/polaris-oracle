@@ -38,6 +38,16 @@ async function bootstrap() {
     credentials: true,
   });
 
+  // Defense-in-depth security headers for a JSON API (issue #26).
+  // No helmet dependency needed; these are the defaults helmet would set.
+  app.use((_req, res, next) => {
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('X-Frame-Options', 'DENY');
+    res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+    res.setHeader('Strict-Transport-Security', 'max-age=15552000; includeSubDomains');
+    next();
+  });
+
   const port = Number(process.env.PORT ?? 3000);
   // Fly.io's proxy reaches machines over private IPv6 — an IPv4-only bind
   // ('0.0.0.0' or omitted) is unreachable despite the process reporting
@@ -47,4 +57,14 @@ async function bootstrap() {
   console.log(`polaris-oracle listening on [::]:${port}`);
 }
 
-bootstrap();
+bootstrap().catch((err: unknown) => {
+  // eslint-disable-next-line no-console
+  console.error('[bootstrap] Fatal startup error — exiting:', err instanceof Error ? err.message : String(err));
+  process.exit(1);
+});
+
+process.on('unhandledRejection', (reason) => {
+  // eslint-disable-next-line no-console
+  console.error('[process] Unhandled promise rejection:', reason instanceof Error ? reason.message : String(reason));
+  process.exit(1);
+});

@@ -51,6 +51,13 @@ export class EmailAuthService {
     @Inject(EMAIL_SENDER) private readonly sender: EmailSender,
   ) {}
 
+  /**
+   * Sends a one-time 6-digit OTP to `email` for sign-in. Enforces a per-email
+   * cooldown (config: `emailCodeResendCooldownSecs`) to prevent spam. The code
+   * is stored as a SHA-256 hash — never the plaintext — with a TTL set by
+   * `emailCodeTtlSecs`. Always resolves (void) so callers can't tell whether
+   * the address exists in the system.
+   */
   async requestCode(email: string): Promise<void> {
     const normalized = email.trim().toLowerCase();
     const existing = this.repo.getCode(normalized);
@@ -146,6 +153,16 @@ export class EmailAuthService {
     );
   }
 
+  /**
+   * Returns the custodial Stellar wallet address for `email`, deploying a new
+   * secp256r1 smart-wallet via `StellarService.deployWallet` on first call.
+   * The generated private key is encrypted at rest (`emailWalletEncKeyHex`)
+   * before being stored; the plaintext never leaves memory. The deployed wallet
+   * uses the same `smart-wallet-factory` path as a passkey wallet, so it is
+   * indistinguishable on-chain. Best-effort Friendbot funding is attempted for
+   * new wallets so the first trade doesn't fail on insufficient balance —
+   * funding errors are logged but never thrown.
+   */
   private async getOrCreateWallet(email: string): Promise<string> {
     const existing = this.repo.getWallet(email);
     if (existing) return existing.address;
@@ -178,6 +195,12 @@ export class EmailAuthService {
     return address;
   }
 
+  /**
+   * Signs and returns a JWT session token encoding `{ email, address }`.
+   * TTL is set by config `sessionTtlSecs`; secret by `sessionJwtSecret`.
+   * This token is handed back to the client as a cookie and verified by
+   * `verifySession` on subsequent requests.
+   */
   private issueSessionToken(email: string, address: string): string {
     const ttlSecs = this.config.get<number>('sessionTtlSecs')!;
     return jwt.sign({ email, address } satisfies SessionClaims, this.config.get<string>('sessionJwtSecret')!, {

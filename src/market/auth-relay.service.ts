@@ -90,6 +90,8 @@ export class AuthRelayService {
    * records which Soroban auth entries the wallet address must sign, and returns
    * the 32-byte hash the passkey needs to sign plus the unsigned entry XDR.
    * No network transaction is submitted here — this is read-only simulation.
+   * The entry XDR's nonce and invocation tree must be passed back unchanged to
+   * `submit()`; mutating it invalidates the hash the passkey already signed.
    * Note: `contractId` has no allowlist check here; callers should validate it
    * against a known-safe list before invoking (see issue #27).
    */

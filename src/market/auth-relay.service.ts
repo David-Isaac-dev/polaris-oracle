@@ -119,6 +119,16 @@ export class AuthRelayService {
     }
   }
 
+  /**
+   * Step 1 of the two-round-trip sponsored relay: simulates the contract call,
+   * records which Soroban auth entries the wallet address must sign, and returns
+   * the 32-byte hash the passkey needs to sign plus the unsigned entry XDR.
+   * No network transaction is submitted here — this is read-only simulation.
+   * The entry XDR's nonce and invocation tree must be passed back unchanged to
+   * `submit()`; mutating it invalidates the hash the passkey already signed.
+   * Note: `contractId` has no allowlist check here; callers should validate it
+   * against a known-safe list before invoking (see issue #27).
+   */
   async prepare(
     walletAddress: string,
     contractId: string,
@@ -170,6 +180,13 @@ export class AuthRelayService {
     };
   }
 
+  /**
+   * Step 2 of the two-round-trip sponsored relay: attaches the WebAuthn
+   * assertion to the unsigned auth entry returned by `prepare`, rebuilds the
+   * sponsored transaction, and submits it.  The wallet address is read back
+   * from the entry XDR itself (not from a client-supplied field) to prevent
+   * spoofing. Calls `pollTransaction` internally to await confirmation.
+   */
   async submit(
     contractId: string,
     functionName: string,
@@ -239,6 +256,12 @@ export class AuthRelayService {
     });
   }
 
+  /**
+   * Polls the RPC node until the transaction is no longer `NOT_FOUND`
+   * (i.e. included in a ledger or failed), retrying up to `attempts` times
+   * with `delayMs` between each check. Throws if the transaction is never
+   * confirmed within the attempt budget.
+   */
   private async pollTransaction(txHash: string, attempts = 30, delayMs = 2000): Promise<rpc.Api.GetTransactionResponse> {
     for (let i = 0; i < attempts; i++) {
       const res = await this.server.getTransaction(txHash);

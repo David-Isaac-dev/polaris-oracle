@@ -26,7 +26,6 @@ export interface AppConfig {
   faucetMaxPerHour: number;
   /** IP-keyed limit on POST /wallets/deploy — mitigates, doesn't close, the known unauthenticated-endpoint gap (see WalletDeployRateLimiter). */
   walletDeployMaxPerHour: number;
-  settleFreshnessWindowSecs: number;
   emailWalletEncKeyHex: string;
   sessionJwtSecret: string;
   sessionTtlSecs: number;
@@ -115,6 +114,13 @@ export interface AppConfig {
   mockRedstoneContract: string | undefined;
   redstoneMaxStalenessSecs: string;
   redstoneToleranceBps: number;
+  /**
+   * Ceiling (in stroops) on the inclusion fee `AuthRelayService` derives
+   * from `getFeeStats()` for sponsored relay/settlement transactions —
+   * caps sponsor cost under a fee spike instead of paying whatever the
+   * network's p70 happens to be.
+   */
+  maxInclusionFeeStroops: number;
 }
 
 import { randomBytes } from 'node:crypto';
@@ -204,7 +210,6 @@ export default (): AppConfig => ({
   faucetAmountStroops: process.env.FAUCET_AMOUNT_STROOPS ?? '5000000000', // 500 XLM
   faucetMaxPerHour: Number(process.env.FAUCET_MAX_PER_HOUR ?? 3),
   walletDeployMaxPerHour: Number(process.env.WALLET_DEPLOY_MAX_PER_HOUR ?? 5),
-  settleFreshnessWindowSecs: Number(process.env.SETTLE_FRESHNESS_WINDOW_SECS ?? 300),
   // 32 bytes hex = AES-256-GCM key, encrypting custodial private keys at rest.
   emailWalletEncKeyHex: devFallbackSecret('EMAIL_WALLET_ENC_KEY', 32),
   sessionJwtSecret: devFallbackSecret('SESSION_JWT_SECRET', 32),
@@ -244,4 +249,5 @@ export default (): AppConfig => ({
   mockRedstoneContract: process.env.MOCK_REDSTONE_CONTRACT,
   redstoneMaxStalenessSecs: process.env.REDSTONE_MAX_STALENESS_SECS ?? '600',
   redstoneToleranceBps: Number(process.env.REDSTONE_TOLERANCE_BPS ?? 150),
+  maxInclusionFeeStroops: Number(process.env.MAX_INCLUSION_FEE_STROOPS ?? 100_000),
 });

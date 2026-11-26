@@ -6,6 +6,7 @@ import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import { marketSpec, perpetualSpec, factorySpec, vaultSpec, mockRedstoneSpec } from './contracts';
 import { hermesPriceToCents } from './pyth-price';
+import { getAccountLock, type AsyncLock } from './account-lock';
 import type { OnChainMarket } from './market.types';
 import type { OnChainPerpetual } from './perpetual.types';
 
@@ -282,6 +283,9 @@ export class StellarService {
   private deployerCliIdentityReady: Promise<void> | null = null;
   readonly networkPassphrase: string;
   readonly rpcUrl: string;
+  /** Serializes sequence-number-sensitive submits per signing account — see account-lock.ts's doc comment. */
+  private readonly accountLock: AsyncLock;
+  private readonly deployerAccountLock: AsyncLock;
 
   constructor(private readonly config: ConfigService) {
     const secret = this.config.get<string>('oracleSecretKey');
@@ -296,6 +300,8 @@ export class StellarService {
     this.networkPassphrase = this.config.get<string>('stellarNetworkPassphrase')!;
     this.rpcUrl = this.config.get<string>('stellarRpcUrl')!;
     this.server = new rpc.Server(this.rpcUrl, { allowHttp: this.rpcUrl.startsWith('http://') });
+    this.accountLock = getAccountLock(this.secretKey);
+    this.deployerAccountLock = getAccountLock(this.deployerSecretKey);
   }
 
   get oraclePublicKey(): string {
@@ -471,10 +477,12 @@ export class StellarService {
    * `require_auth()` against whichever key actually holds that role.
    */
   async terminatePerpetual(contractId: string): Promise<string> {
-    const client = this.buildClient<PerpetualContractMethods>(perpetualSpec, contractId, this.deployerKeypair);
-    const tx = await this.withRpcRetry('terminate', contractId, () => client.terminate({ admin: this.deployerKeypair.publicKey() }));
-    const sent = await tx.signAndSend();
-    return this.txHashOf(sent);
+    return this.deployerAccountLock.run(async () => {
+      const client = this.buildClient<PerpetualContractMethods>(perpetualSpec, contractId, this.deployerKeypair);
+      const tx = await this.withRpcRetry(() => client.terminate({ admin: this.deployerKeypair.publicKey() }));
+      const sent = await tx.signAndSend();
+      return sent.sendTransactionResponse?.hash ?? sent.getTransactionResponse?.txHash ?? '';
+    });
   }
 
   /**
@@ -491,29 +499,44 @@ export class StellarService {
    * against Lazer would then correctly reject.
    */
   async refreshMockRedstonePrice(contractId: string, priceCents: bigint, decimals = 8): Promise<string> {
-    const client = this.mockRedstoneClient(contractId);
-    const price = priceCents * 10n ** BigInt(decimals - 2);
-    const timestamp = BigInt(Math.floor(Date.now() / 1000));
-    const tx = await this.withRpcRetry('set_price', contractId, () => client.set_price({ price, timestamp }));
-    const sent = await tx.signAndSend();
-    return this.txHashOf(sent);
+    return this.accountLock.run(async () => {
+      const client = this.mockRedstoneClient(contractId);
+      const price = priceCents * 10n ** BigInt(decimals - 2);
+      const timestamp = BigInt(Math.floor(Date.now() / 1000));
+      const tx = await this.withRpcRetry(() => client.set_price({ price, timestamp }));
+      const sent = await tx.signAndSend();
+      return sent.sendTransactionResponse?.hash ?? sent.getTransactionResponse?.txHash ?? '';
+    });
   }
 
   /** Permissionless at the contract level (see `record_price_checkpoint`'s own doc comment in `polaris-contracts`) — signed here by this process's own keypair purely because *some* account has to pay the fee, same as `settle`/`cancel`. */
   async recordPriceCheckpoint(contractId: string, payload: Buffer): Promise<string> {
-    const client = this.perpetualClient(contractId);
-    const tx = await this.withRpcRetry('record_price_checkpoint', contractId, () => client.record_price_checkpoint({ payload }));
-    const sent = await tx.signAndSend();
-    return this.txHashOf(sent);
+    return this.accountLock.run(async () => {
+      const client = this.perpetualClient(contractId);
+      const tx = await this.withRpcRetry(() => client.record_price_checkpoint({ payload }));
+      const sent = await tx.signAndSend();
+      return sent.sendTransactionResponse?.hash ?? sent.getTransactionResponse?.txHash ?? '';
+    });
   }
 
   // ---------- oracle-authorized writes ----------
+  //
+  // settle/cancel/settleViaReflector/vaultWithdraw/deployWallet/initializeFactory
+  // all sign with this process's own keypair against its single source
+  // account. Each one is wrapped in `accountLock.run` (see account-lock.ts)
+  // because `signAndSend` internally fetches the account's current sequence
+  // number before submitting — two of these running concurrently (e.g. an
+  // admin-triggered settle while a scheduled retry is also submitting) would
+  // otherwise race to read the same sequence number and one submit fails
+  // with `tx_bad_seq`.
 
   async settle(contractId: string, payload: Buffer): Promise<string> {
-    const client = this.marketClient(contractId);
-    const tx = await this.withRpcRetry('settle', contractId, () => client.settle({ payload }));
-    const sent = await tx.signAndSend();
-    return this.txHashOf(sent);
+    return this.accountLock.run(async () => {
+      const client = this.marketClient(contractId);
+      const tx = await this.withRpcRetry(() => client.settle({ payload }));
+      const sent = await tx.signAndSend();
+      return sent.sendTransactionResponse?.hash ?? sent.getTransactionResponse?.txHash ?? '';
+    });
   }
 
   /**
@@ -529,17 +552,21 @@ export class StellarService {
    * other settle failure (falls through to the cancel fallback).
    */
   async settleViaReflector(contractId: string): Promise<string> {
-    const client = this.marketClient(contractId);
-    const tx = await this.withRpcRetry('settle_via_reflector', contractId, () => client.settle_via_reflector());
-    const sent = await tx.signAndSend();
-    return this.txHashOf(sent);
+    return this.accountLock.run(async () => {
+      const client = this.marketClient(contractId);
+      const tx = await this.withRpcRetry(() => client.settle_via_reflector());
+      const sent = await tx.signAndSend();
+      return sent.sendTransactionResponse?.hash ?? sent.getTransactionResponse?.txHash ?? '';
+    });
   }
 
   async cancel(contractId: string): Promise<string> {
-    const client = this.marketClient(contractId);
-    const tx = await this.withRpcRetry('cancel', contractId, () => client.cancel());
-    const sent = await tx.signAndSend();
-    return this.txHashOf(sent);
+    return this.accountLock.run(async () => {
+      const client = this.marketClient(contractId);
+      const tx = await this.withRpcRetry(() => client.cancel());
+      const sent = await tx.signAndSend();
+      return sent.sendTransactionResponse?.hash ?? sent.getTransactionResponse?.txHash ?? '';
+    });
   }
 
   /**
@@ -557,10 +584,12 @@ export class StellarService {
    * `initializeFactory` below.
    */
   async deployWallet(factoryContractId: string, publicKey: Buffer): Promise<string> {
-    const client = this.factoryClient(factoryContractId);
-    const tx = await this.withRpcRetry('deploy', factoryContractId, () => client.deploy({ public_key: publicKey }));
-    const sent = await tx.signAndSend();
-    return sent.result.unwrap();
+    return this.accountLock.run(async () => {
+      const client = this.factoryClient(factoryContractId);
+      const tx = await this.withRpcRetry(() => client.deploy({ public_key: publicKey }));
+      const sent = await tx.signAndSend();
+      return sent.result.unwrap();
+    });
   }
 
   /**
@@ -574,13 +603,15 @@ export class StellarService {
    * is fixed at factory setup rather than a per-deploy parameter.
    */
   async initializeFactory(factoryContractId: string, walletWasmHash: Buffer, origin: Buffer): Promise<string> {
-    const client = this.factoryClient(factoryContractId);
-    const tx = await this.withRpcRetry('initialize', factoryContractId, () =>
-      client.initialize({ admin: this.oraclePublicKey, wasm_hash: walletWasmHash, origin }),
-    );
-    const sent = await tx.signAndSend();
-    sent.result.unwrap();
-    return this.txHashOf(sent);
+    return this.accountLock.run(async () => {
+      const client = this.factoryClient(factoryContractId);
+      const tx = await this.withRpcRetry(() =>
+        client.initialize({ admin: this.oraclePublicKey, wasm_hash: walletWasmHash, origin }),
+      );
+      const sent = await tx.signAndSend();
+      sent.result.unwrap();
+      return sent.sendTransactionResponse?.hash ?? sent.getTransactionResponse?.txHash ?? '';
+    });
   }
 
   /**
@@ -654,17 +685,19 @@ export class StellarService {
 
   /** Moves `amount` stroops from the vault to this process's own account, to fund a new market's `initial_liquidity` — the same account `deployMarket` already transfers that liquidity from. */
   async vaultWithdraw(vaultContractId: string, amount: bigint): Promise<string> {
-    const client = this.vaultClient(vaultContractId);
-    const tx = await this.withRpcRetry('withdraw', vaultContractId, () =>
-      client.withdraw({
-        admin: this.oraclePublicKey,
-        to: this.oraclePublicKey,
-        amount,
-      }),
-    );
-    const sent = await tx.signAndSend();
-    sent.result.unwrap();
-    return this.txHashOf(sent);
+    return this.accountLock.run(async () => {
+      const client = this.vaultClient(vaultContractId);
+      const tx = await this.withRpcRetry(() =>
+        client.withdraw({
+          admin: this.oraclePublicKey,
+          to: this.oraclePublicKey,
+          amount,
+        }),
+      );
+      const sent = await tx.signAndSend();
+      sent.result.unwrap();
+      return sent.sendTransactionResponse?.hash ?? sent.getTransactionResponse?.txHash ?? '';
+    });
   }
 
   // ---------- market deployment (Stellar CLI) ----------

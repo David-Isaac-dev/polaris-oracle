@@ -28,6 +28,18 @@ const RECONCILE_READ_RETRY_DELAY_MS = 750;
 const SETTLE_RETRY_ATTEMPTS = 3;
 const SETTLE_RETRY_DELAY_MS = 75_000;
 /**
+ * `tryCancel` used to have no retry at all: on failure it just logged and
+ * persisted `status: 'pending'` with no timer scheduled to ever touch that
+ * market again — the only way out was an admin noticing and calling
+ * `/markets/:id/cancel` by hand. Since `cancel` is permissionless and
+ * idempotent-safe on-chain (see `tryCancel`'s own comment), and the same
+ * transient-RPC-hiccup class of failure already justifies retries elsewhere
+ * in this file (`SETTLE_RETRY_ATTEMPTS`, `withRpcRetry`), a failed cancel
+ * deserves the same automatic retry treatment rather than silently stalling
+ * forever.
+ */
+const CANCEL_RETRY_DELAY_MS = 60_000;
+/**
  * Confirmed live, twice, this session: a timer scheduled to fire exactly at
  * `expiry`/`grace_period_secs` (computed from this process's wall clock)
  * can beat the chain to it — the contract checks `now >= ...` against the
@@ -42,6 +54,20 @@ const SETTLE_RETRY_DELAY_MS = 75_000;
  * `arm()`, which don't need it.
  */
 const LEDGER_LAG_BUFFER_MS = 8_000;
+/**
+ * `onModuleInit` used to call `arm()` for every watched/pending market
+ * synchronously in a tight loop — for any market already past its expiry
+ * or grace period, `arm()` fires `trySettle`/`tryCancel` immediately, so a
+ * restart with several overdue markets launched that many settle/cancel
+ * attempts against the chain in the same instant. That's a thundering herd
+ * against the RPC node (and, worse, several of those calls can share the
+ * oracle's source account and race on its sequence number — see
+ * account-lock.ts) for no benefit: nothing requires overdue markets to be
+ * resolved within the same tick of each other. Staggering each market's
+ * initial arm by a small, increasing offset spreads that burst out without
+ * meaningfully delaying any individual market's resolution.
+ */
+const BOOT_ARM_STAGGER_MS = 500;
 
 /**
  * Owns the in-memory timer state that drives settlement automation. The
@@ -59,6 +85,17 @@ export class MarketService implements OnModuleInit {
   private readonly logger = new Logger(MarketService.name);
   private readonly settleTimers = new Map<string, NodeJS.Timeout>();
   private readonly cancelTimers = new Map<string, NodeJS.Timeout>();
+  /**
+   * Tracks markets currently inside `trySettle`'s retry loop. `trySettle`
+   * has no per-market guard of its own: the scheduled retry path (sleeping
+   * up to `SETTLE_RETRY_DELAY_MS` between attempts) and an admin's manual
+   * `triggerSettle` can both call it for the same market at the same
+   * time — e.g. an admin forces a retry during the 75s sleep of an
+   * already-running automatic retry loop — and both loops then submit
+   * `settle` concurrently for the same contract. Checked at the start of
+   * both entry points (`arm`'s scheduled fire and `triggerSettle`).
+   */
+  private readonly settleInFlight = new Set<string>();
 
   constructor(
     private readonly repo: MarketRepository,
@@ -70,9 +107,16 @@ export class MarketService implements OnModuleInit {
   ) {}
 
   onModuleInit(): void {
+    let staggerIndex = 0;
     for (const m of this.repo.getAll()) {
       if (m.status === 'watching' || m.status === 'pending') {
-        this.arm(m);
+        const delay = staggerIndex * BOOT_ARM_STAGGER_MS;
+        staggerIndex++;
+        if (delay === 0) {
+          this.arm(m);
+        } else {
+          setTimeout(() => this.arm(m), delay);
+        }
       }
     }
   }
@@ -140,6 +184,19 @@ export class MarketService implements OnModuleInit {
   private async trySettle(m: WatchedMarket): Promise<void> {
     if (this.isTerminal(m.status)) return;
 
+    if (this.settleInFlight.has(m.contractId)) {
+      this.logger.warn(`settle already in flight for ${m.contractId}, skipping concurrent call`);
+      return;
+    }
+    this.settleInFlight.add(m.contractId);
+    try {
+      await this.trySettleInner(m);
+    } finally {
+      this.settleInFlight.delete(m.contractId);
+    }
+  }
+
+  private async trySettleInner(m: WatchedMarket): Promise<void> {
     if (!this.oracle.isAvailable) {
       // No Lazer payload to settle with at all (no PYTH_LAZER_TOKEN
       // configured) — try the contract's Reflector-only settlement path
@@ -204,10 +261,21 @@ export class MarketService implements OnModuleInit {
       // Cancel is permissionless and idempotent-safe on-chain (a second
       // call after it's already Cancelled/Resolved just errors) — that case
       // is exactly what reconcileWithChain catches above. Anything else,
-      // log and leave status as-is; an admin can retry via /markets/:id/cancel.
-      this.logger.error(`cancel failed for ${m.contractId}: ${message}`);
+      // log, leave status as 'pending', and schedule an automatic retry
+      // (an admin can still force one sooner via /markets/:id/cancel) —
+      // without this, a transient failure here left the market stuck
+      // 'pending' forever with nothing left to ever retry it.
+      this.logger.error(`cancel failed for ${m.contractId}: ${message}, retrying in ${CANCEL_RETRY_DELAY_MS / 1000}s`);
       this.persist(m, { status: 'pending', lastError: message });
+      this.scheduleCancelRetry(m);
     }
+  }
+
+  private scheduleCancelRetry(m: WatchedMarket): void {
+    const existing = this.cancelTimers.get(m.contractId);
+    if (existing) clearTimeout(existing);
+    const timer = setTimeout(() => void this.tryCancel(m), CANCEL_RETRY_DELAY_MS);
+    this.cancelTimers.set(m.contractId, timer);
   }
 
   /**
